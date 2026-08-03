@@ -23,6 +23,45 @@ pub struct Config {
     pub render: Render,
     pub bodies: Bodies,
     pub ephemeris: Ephemeris,
+    pub lighting: Lighting,
+}
+
+/// How a body's unlit side is drawn.
+///
+/// The physical answer is "black", but a wallpaper where half the planets are
+/// invisible silhouettes reads badly. So the terminator is modelled as mainly a
+/// *saturation* gradient rather than a brightness one: the night side keeps
+/// most of its luminance and loses most of its colour, so you can still see the
+/// planet while sunlight is still obviously what picks out its hue.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Lighting {
+    /// Luminance of the fully unlit side, as a fraction of the lit side.
+    /// `1.0` flattens the terminator away entirely; `0.0` is physically honest
+    /// and mostly black.
+    pub night_brightness: f32,
+    /// How much of the body's colour survives on the unlit side. Low values
+    /// drain it toward grey, which is what makes the terminator read as
+    /// desaturation rather than as darkness.
+    pub night_saturation: f32,
+    /// Chroma of the fully lit side. Above `1.0` pushes past the body's raw
+    /// albedo.
+    ///
+    /// This is what makes the effect work on the gas giants: their true
+    /// colours are low-chroma creams, so draining saturation from them barely
+    /// registers and they just go pale. Boosting the lit side instead gives the
+    /// terminator something to actually contrast against.
+    pub day_saturation: f32,
+}
+
+impl Default for Lighting {
+    fn default() -> Self {
+        Self {
+            night_brightness: 0.30,
+            night_saturation: 0.15,
+            day_saturation: 1.35,
+        }
+    }
 }
 
 /// Where positions come from.
@@ -240,7 +279,7 @@ impl Default for Sky {
             star_brightness: 1.0,
             milky_way: 0.80,
             nebula: 0.35,
-            ambient: 0.030,
+            ambient: 0.018,
             rotation_deg: 0.0,
             real_stars: true,
             magnitude_limit: 6.5,
@@ -397,6 +436,15 @@ impl Config {
         }
         if self.orbits.segments < 16 {
             return Err(ConfigError::Range("orbits.segments", "at least 16"));
+        }
+        if !(0.0..=1.0).contains(&self.lighting.night_brightness) {
+            return Err(ConfigError::Range("lighting.night_brightness", "0.0 to 1.0"));
+        }
+        if !(0.0..=1.0).contains(&self.lighting.night_saturation) {
+            return Err(ConfigError::Range("lighting.night_saturation", "0.0 to 1.0"));
+        }
+        if !(0.0..=3.0).contains(&self.lighting.day_saturation) {
+            return Err(ConfigError::Range("lighting.day_saturation", "0.0 to 3.0"));
         }
         if !(-2.0..=6.5).contains(&self.sky.magnitude_limit) {
             return Err(ConfigError::Range("sky.magnitude_limit", "-2.0 to 6.5"));

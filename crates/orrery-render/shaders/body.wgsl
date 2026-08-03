@@ -234,7 +234,27 @@ fn fragment_main(in: BodyVertex) -> @location(0) vec4<f32> {
     let wrap = 0.06;
     let diffuse = clamp((incidence + wrap) / (1.0 + wrap), 0.0, 1.0);
 
-    var colour = albedo * diffuse;
+    // The terminator is mainly a saturation gradient, not a brightness one.
+    //
+    // Physically the night side is black, but then half the planets in the
+    // frame become invisible silhouettes. Instead the unlit side keeps most of
+    // its luminance and loses most of its chroma: you can still see the planet,
+    // and sunlight is still visibly what gives it colour.
+    //
+    // The ramp is deliberately steep. Interpolating linearly on `diffuse`
+    // leaves the whole disc half-desaturated, because most of a sphere is at
+    // grazing illumination -- the planets lose their identity and go pale grey.
+    // Raising it to a low power restores full colour as soon as a surface is
+    // meaningfully lit, and confines the drain to the genuinely dark limb.
+    let lit = pow(diffuse, 0.4);
+    let luminance = dot(albedo, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let saturation = mix(globals.lighting.y, globals.lighting.z, lit);
+    let level = mix(globals.lighting.x, 1.0, lit);
+    // Saturation above 1 extrapolates past the albedo, so clamp away negatives.
+    var colour = max(
+        mix(vec3<f32>(luminance), albedo, saturation),
+        vec3<f32>(0.0),
+    ) * level;
 
     // Specular glint, mostly visible on Earth's oceans.
     if (kind == KIND_EARTHLIKE) {
@@ -258,9 +278,6 @@ fn fragment_main(in: BodyVertex) -> @location(0) vec4<f32> {
         }
         colour = colour + tint * rim * rim_light * atmosphere;
     }
-
-    // A trace of ambient so the night side is not pure black.
-    colour = colour + albedo * globals.sky_b.x * 0.5;
 
     return vec4<f32>(colour, 1.0);
 }

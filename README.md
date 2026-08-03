@@ -106,6 +106,21 @@ exactly and the constellations keep their shapes. Precession is not modelled:
 it shifts the whole sky about a third of a degree since J2000, uniformly, which
 against no horizon is invisible.
 
+### The terminator
+
+Half the planets are between you and the Sun at any moment, so physically
+correct lighting makes half of them black silhouettes. Instead the day/night
+boundary is modelled as mainly a **saturation** gradient: the unlit side keeps
+most of its luminance and loses most of its chroma, so the planet stays visible
+while sunlight is still obviously what gives it colour.
+
+Two details make it work. The ramp is steep — interpolating linearly on the
+diffuse term leaves the whole disc half-desaturated, because most of a sphere
+sits at grazing illumination, and every planet goes pale grey. And the lit side
+is pushed *past* the body's true albedo, because the gas giants are low-chroma
+creams to begin with: draining saturation from them barely registers, so the
+contrast has to come from the other end.
+
 The procedural starfield is still there underneath, supplying the sub-naked-eye
 haze that a real photograph shows — but it was turned down hard once the real
 catalogue arrived, because the two were competing.
@@ -206,6 +221,11 @@ days_per_second = 0.0  # 0 = real time. Set 1 to watch the system turn.
 [scale.orbit]
 law = "power"          # or "linear" for true scale, or "logarithmic"
 exponent = 0.45        # lower compresses the outer system harder
+
+[lighting]
+night_brightness = 0.30      # unlit side stays visible...
+night_saturation = 0.15      # ...but loses its colour
+day_saturation = 1.35        # lit side pushed past true albedo, for contrast
 
 [sky]
 real_stars = true            # the catalogue; false leaves a procedural sky

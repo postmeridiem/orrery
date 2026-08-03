@@ -78,6 +78,7 @@ struct GpuGlobals {
     viewport: [f32; 4],
     post: [f32; 4],
     sky_c: [f32; 4],
+    lighting: [f32; 4],
 }
 
 #[repr(C)]
@@ -1001,6 +1002,12 @@ impl Renderer {
                 STAR_CORE_RADIUS_PIXELS,
                 config.sky.constellation_opacity,
                 config.sky.deep_sky_opacity,
+            ],
+            lighting: [
+                config.lighting.night_brightness,
+                config.lighting.night_saturation,
+                config.lighting.day_saturation,
+                0.0,
             ],
         };
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));

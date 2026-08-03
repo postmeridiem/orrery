@@ -84,10 +84,9 @@ star_brightness = 1.0
 # the solar system at its true angle of roughly 60 degrees to the ecliptic.
 milky_way = 0.80
 nebula = 0.35
-# Lifts the darkest sky off pure black, and faintly lights the night side of
-# each planet. Planets between you and the Sun genuinely do show their night
-# side, so this is what keeps them from being flat black discs.
-ambient = 0.030
+# Lifts the darkest sky off pure black. Planet night sides are handled
+# separately, under [lighting].
+ambient = 0.018
 rotation_deg = 0.0
 
 # The real sky. 8,404 catalogued stars to magnitude 6.5 -- the whole naked-eye
@@ -145,6 +144,28 @@ resolution_scale = 1.0
 # correct sky, just to 0.11 degrees instead.
 online = true
 refresh_days = 365.0
+
+[lighting]
+# How the unlit side of a planet is drawn.
+#
+# Physically it is black -- but planets between you and the Sun then become
+# invisible silhouettes, which is half of them at any time. So the terminator is
+# modelled as mainly a *saturation* gradient rather than a brightness one: the
+# night side keeps most of its luminance and loses most of its colour. You can
+# still see the planet, and sunlight is still visibly what gives it its hue.
+#
+# Luminance of the fully unlit side, relative to the lit side. Raise it to see
+# more of the night side; 0.0 is physically honest and mostly black.
+night_brightness = 0.30
+# How much colour survives on the unlit side. Low drains it toward grey.
+night_saturation = 0.15
+# Chroma of the fully lit side. Above 1.0 pushes past the body's true albedo.
+#
+# This is what makes the effect work on the gas giants: their real colours are
+# low-chroma creams, so draining saturation from them barely registers and they
+# just go pale. Boosting the lit side gives the terminator something to contrast
+# against.
+day_saturation = 1.35
 
 [bodies]
 # Case-insensitive. Pluto is off by default: it is not a planet, and its 17
