@@ -150,7 +150,7 @@ fn sun_emission(base: vec3<f32>, p: vec3<f32>, normal: vec3<f32>, view: vec3<f32
     let mu = clamp(dot(normal, view), 0.0, 1.0);
     let limb = 0.34 + 0.66 * mu + 0.12 * mu * mu;
 
-    return base * surface * limb * 14.0;
+    return base * surface * limb * globals.lighting.w;
 }
 
 // Is a ring point in the planet's shadow? The Sun sits at the origin, so the

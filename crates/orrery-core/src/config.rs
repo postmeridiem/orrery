@@ -52,6 +52,12 @@ pub struct Lighting {
     /// registers and they just go pale. Boosting the lit side instead gives the
     /// terminator something to actually contrast against.
     pub day_saturation: f32,
+    /// How brightly the Sun's own surface emits, in HDR units.
+    ///
+    /// It is the only emissive body in the scene, so this also sets how far
+    /// its bloom reaches. Turned down, the inner planets stop being washed out
+    /// by the glare of something they orbit very close to.
+    pub sun_intensity: f32,
 }
 
 impl Default for Lighting {
@@ -60,6 +66,7 @@ impl Default for Lighting {
             night_brightness: 0.30,
             night_saturation: 0.15,
             day_saturation: 1.35,
+            sun_intensity: 6.0,
         }
     }
 }
@@ -117,6 +124,16 @@ pub struct Camera {
     pub orbit_speed_deg_per_hour: f32,
     /// Fraction of the frame the outermost drawn orbit should span.
     pub fill: f32,
+    /// Fit the scene to the frame's *width* rather than to whichever axis binds
+    /// first.
+    ///
+    /// On a wide monitor the solar system is much wider than it is tall, so
+    /// fitting both axes leaves it floating in the middle with the width
+    /// unused. Filling the width instead means the vertical extent has to fit
+    /// too, which is what `elevation_deg` controls -- and on an ultrawide the
+    /// elevation genuinely has to come down, so this lowers it automatically
+    /// rather than letting the scene overflow.
+    pub fit_width: bool,
     /// Offset of the system's centre within the frame, in fractions of the
     /// viewport. Useful for keeping the Sun clear of desktop icons.
     pub offset_x: f32,
@@ -132,7 +149,8 @@ impl Default for Camera {
             fov_deg: 38.0,
             zoom: 1.0,
             orbit_speed_deg_per_hour: 1.5,
-            fill: 0.86,
+            fill: 0.94,
+            fit_width: true,
             offset_x: 0.0,
             offset_y: 0.0,
         }
@@ -368,6 +386,13 @@ pub struct Bodies {
     pub moon_distance_boost: f32,
     /// Draw the asteroid belt between Mars and Jupiter.
     pub asteroid_belt: bool,
+    /// Draw the Kuiper belt beyond Neptune. This is the outermost thing in the
+    /// scene, so switching it on pulls the camera back and shrinks everything
+    /// else.
+    pub kuiper_belt: bool,
+    /// Particles in the asteroid belt. The Kuiper belt gets 1.6x this, being
+    /// both wider and more populous.
+    pub belt_particles: u32,
 }
 
 impl Default for Bodies {
@@ -383,6 +408,8 @@ impl Default for Bodies {
             moon: true,
             moon_distance_boost: 3.5,
             asteroid_belt: true,
+            kuiper_belt: true,
+            belt_particles: 6000,
         }
     }
 }
@@ -445,6 +472,9 @@ impl Config {
         }
         if !(0.0..=3.0).contains(&self.lighting.day_saturation) {
             return Err(ConfigError::Range("lighting.day_saturation", "0.0 to 3.0"));
+        }
+        if !(0.0..=100.0).contains(&self.lighting.sun_intensity) {
+            return Err(ConfigError::Range("lighting.sun_intensity", "0.0 to 100.0"));
         }
         if !(-2.0..=6.5).contains(&self.sky.magnitude_limit) {
             return Err(ConfigError::Range("sky.magnitude_limit", "-2.0 to 6.5"));

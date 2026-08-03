@@ -21,9 +21,19 @@ zoom = 1.0
 # Slow drift of the azimuth. This is where most of the visible motion comes
 # from, since the planets themselves move imperceptibly in real time.
 orbit_speed_deg_per_hour = 1.5
-# Fraction of the frame the outermost orbit spans. Honoured exactly, at every
-# aspect ratio.
-fill = 0.86
+# Fraction of the frame the outermost drawn thing spans. Honoured exactly, at
+# every aspect ratio.
+fill = 0.94
+# Fit to the frame's *width* rather than to whichever axis binds first.
+#
+# On a wide monitor the solar system is far wider than it is tall, so fitting
+# both axes leaves it floating with the width unused. Filling the width means
+# the vertical extent must fit too -- and that is a function of the tilt: a ring
+# spanning the full width projects to about `fill * aspect * sin(elevation)` of
+# the half-height. On a 21:9 screen that overflows above roughly 25 degrees, so
+# rather than let it clip, the elevation is automatically lowered until it fits.
+# Your `elevation_deg` is therefore a maximum, not an exact value.
+fit_width = true
 # Shift the system within the frame, in fractions of the viewport. Handy for
 # keeping the Sun out from behind a column of desktop icons.
 offset_x = 0.0
@@ -68,7 +78,7 @@ exponent = 0.45
 [scale.body]
 # Drawn radius of an Earth-sized body, in scene units. Earth's true radius is
 # 4.3e-5 AU, so at any framing that shows the orbits, real sizes are sub-pixel.
-earth_radius_units = 0.027
+earth_radius_units = 0.054
 # 1.0 keeps true relative sizes (Jupiter 11x Earth); lower pulls them together.
 exponent = 0.4
 # The Sun alone is 109 Earth radii and tends to dominate; this dials it back
@@ -167,6 +177,12 @@ night_saturation = 0.15
 # against.
 day_saturation = 1.35
 
+# How brightly the Sun's surface emits, in HDR units. It is the only emissive
+# body, so this also sets how far its bloom reaches -- turn it down and the
+# inner planets stop being washed out by the glare of something they orbit
+# very close to.
+sun_intensity = 6.0
+
 [bodies]
 # Case-insensitive. Pluto is off by default: it is not a planet, and its 17
 # degree inclination sits it awkwardly outside the plane of the others.
@@ -177,3 +193,8 @@ moon = true
 # real one, so the phase and the side it sits on read correctly.
 moon_distance_boost = 3.5
 asteroid_belt = true
+# The Kuiper belt, beyond Neptune. This is the outermost thing in the scene, so
+# switching it on pulls the camera back and shrinks everything else.
+kuiper_belt = true
+# Particles in the asteroid belt; the Kuiper belt gets 1.6x, being wider.
+belt_particles = 6000

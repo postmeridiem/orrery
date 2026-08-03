@@ -169,6 +169,15 @@ struct Celestial {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
+struct GpuBeltParticle {
+    /// xyz = world position, w = drawn radius.
+    position_size: [f32; 4],
+    /// rgb = tint, a = brightness.
+    colour: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
 struct GpuTonemapSettings {
     /// exposure, bloom intensity, unused, unused.
     values: [f32; 4],
@@ -236,6 +245,7 @@ pub struct Renderer {
 
     sky_pipeline: wgpu::RenderPipeline,
     star_pipeline: wgpu::RenderPipeline,
+    belt_pipeline: wgpu::RenderPipeline,
     constellation_pipeline: wgpu::RenderPipeline,
     deep_sky_pipeline: wgpu::RenderPipeline,
     body_pipeline: wgpu::RenderPipeline,
@@ -253,6 +263,11 @@ pub struct Renderer {
     targets: Targets,
     celestial: Option<Celestial>,
     celestial_layout: wgpu::BindGroupLayout,
+    belt_layout: wgpu::BindGroupLayout,
+    belt_buffer: wgpu::Buffer,
+    belt_bind_group: wgpu::BindGroup,
+    belt_capacity: usize,
+    belt_count: u32,
 }
 
 impl Renderer {
@@ -283,6 +298,7 @@ impl Renderer {
         let orbit_shader = make_shader("orbit", include_str!("../shaders/orbit.wgsl"), true);
         let celestial_shader =
             make_shader("celestial", include_str!("../shaders/celestial.wgsl"), true);
+        let belt_shader = make_shader("belt", include_str!("../shaders/belt.wgsl"), true);
         let bloom_shader = make_shader("bloom", include_str!("../shaders/bloom.wgsl"), false);
         let tonemap_shader = make_shader("tonemap", include_str!("../shaders/tonemap.wgsl"), false);
 
@@ -329,6 +345,20 @@ impl Renderer {
                 },
                 count: None,
             }),
+        });
+
+        let belt_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("belt"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
         });
 
         let blit_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -664,6 +694,55 @@ impl Renderer {
         let deep_sky_pipeline =
             celestial_pipeline("deep sky", "deep_sky_vertex", "deep_sky_fragment");
 
+        let belt_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("belt"),
+                bind_group_layouts: &[Some(&globals_layout), Some(&belt_layout)],
+                immediate_size: 0,
+            });
+        let belt_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("belt"),
+            layout: Some(&belt_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &belt_shader,
+                entry_point: Some("vertex_main"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                cull_mode: None,
+                ..Default::default()
+            },
+            // Depth-tested against the planets, but writing nothing: the
+            // particles are additive and must not occlude each other.
+            depth_stencil: depth_test(false),
+            multisample,
+            fragment: Some(wgpu::FragmentState {
+                module: &belt_shader,
+                entry_point: Some("fragment_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: HDR_FORMAT,
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::One,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent::REPLACE,
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let belt_capacity = 16384;
+        let belt_buffer = new_belt_buffer(device, belt_capacity);
+        let belt_bind_group = new_belt_bind_group(device, &belt_layout, &belt_buffer);
+
         let blit_pipeline = |label: &str, entry: &str, blend: Option<wgpu::BlendState>| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
@@ -755,6 +834,7 @@ impl Renderer {
             ring,
             sky_pipeline,
             star_pipeline,
+            belt_pipeline,
             constellation_pipeline,
             deep_sky_pipeline,
             body_pipeline,
@@ -770,6 +850,11 @@ impl Renderer {
             targets,
             celestial: None,
             celestial_layout,
+            belt_layout,
+            belt_buffer,
+            belt_bind_group,
+            belt_capacity,
+            belt_count: 0,
         }
     }
 
@@ -919,6 +1004,7 @@ impl Renderer {
         self.upload_globals(queue, scene, config, aspect, elapsed_seconds);
         let (sphere_instances, ring_instances) = self.upload_instances(device, queue, scene);
         self.upload_orbits(device, queue, scene, config);
+        self.upload_belts(device, queue, scene);
 
         queue.write_buffer(
             &self.tonemap_settings,
@@ -1007,7 +1093,7 @@ impl Renderer {
                 config.lighting.night_brightness,
                 config.lighting.night_saturation,
                 config.lighting.day_saturation,
-                0.0,
+                config.lighting.sun_intensity,
             ],
         };
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
@@ -1048,6 +1134,41 @@ impl Renderer {
         queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&instances));
 
         (0..sphere_count, sphere_count..total)
+    }
+
+    fn upload_belts(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, scene: &Scene) {
+        let particles: Vec<GpuBeltParticle> = scene
+            .belts
+            .iter()
+            .flat_map(|belt| {
+                belt.particles.iter().map(move |particle| GpuBeltParticle {
+                    position_size: [
+                        particle.position.x,
+                        particle.position.y,
+                        particle.position.z,
+                        particle.size,
+                    ],
+                    colour: [
+                        belt.color[0],
+                        belt.color[1],
+                        belt.color[2],
+                        particle.brightness,
+                    ],
+                })
+            })
+            .collect();
+
+        self.belt_count = particles.len() as u32;
+        if particles.is_empty() {
+            return;
+        }
+        if particles.len() > self.belt_capacity {
+            self.belt_capacity = particles.len().next_power_of_two();
+            self.belt_buffer = new_belt_buffer(device, self.belt_capacity);
+            self.belt_bind_group =
+                new_belt_bind_group(device, &self.belt_layout, &self.belt_buffer);
+        }
+        queue.write_buffer(&self.belt_buffer, 0, bytemuck::cast_slice(&particles));
     }
 
     fn upload_orbits(
@@ -1175,6 +1296,12 @@ impl Renderer {
             pass.set_vertex_buffer(0, self.ring.vertices.slice(..));
             pass.set_index_buffer(self.ring.indices.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..self.ring.index_count, 0, ring_instances);
+        }
+
+        if self.belt_count > 0 {
+            pass.set_pipeline(&self.belt_pipeline);
+            pass.set_bind_group(1, &self.belt_bind_group, &[]);
+            pass.draw(0..4, 0..self.belt_count);
         }
 
         if !self.orbit_ranges.is_empty() {
@@ -1337,6 +1464,30 @@ fn new_instance_bind_group(
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("body instances"),
+        layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: buffer.as_entire_binding(),
+        }],
+    })
+}
+
+fn new_belt_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("belt particles"),
+        size: (capacity * size_of::<GpuBeltParticle>()) as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
+fn new_belt_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    buffer: &wgpu::Buffer,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("belt particles"),
         layout,
         entries: &[wgpu::BindGroupEntry {
             binding: 0,

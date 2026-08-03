@@ -60,6 +60,94 @@ pub struct OrbitRing {
     pub body_fraction: f32,
 }
 
+/// One particle of a debris belt.
+#[derive(Debug, Clone, Copy)]
+pub struct BeltParticle {
+    pub position: Vec3,
+    /// Drawn radius in scene units.
+    pub size: f32,
+    pub brightness: f32,
+}
+
+/// A ring of debris: the main asteroid belt, or the Kuiper belt.
+///
+/// Drawn as individual particles rather than a solid annulus, because that is
+/// what they are -- and because a torus of points reads as depth in a way a
+/// flat band does not.
+#[derive(Debug, Clone)]
+pub struct Belt {
+    pub name: &'static str,
+    pub particles: Vec<BeltParticle>,
+    pub color: [f32; 3],
+}
+
+/// Deterministic hash, so a belt looks identical from frame to frame.
+fn hash_u32(mut x: u32) -> u32 {
+    x ^= x >> 16;
+    x = x.wrapping_mul(0x7feb_352d);
+    x ^= x >> 15;
+    x = x.wrapping_mul(0x846c_a68b);
+    x ^ (x >> 16)
+}
+
+fn random_unit(seed: u32, index: u32, stream: u32) -> f64 {
+    hash_u32(seed ^ hash_u32(index.wrapping_mul(0x9E37_79B9) ^ stream)) as f64 / u32::MAX as f64
+}
+
+/// Scatter `count` particles through a torus between `inner_au` and `outer_au`.
+fn build_belt(
+    name: &'static str,
+    inner_au: f64,
+    outer_au: f64,
+    thickness_au: f64,
+    count: u32,
+    seed: u32,
+    color: [f32; 3],
+    brightness: f32,
+    scale: &crate::scale::RadialScale,
+) -> Belt {
+    let brightness_scale = brightness;
+    let particles = (0..count)
+        .map(|index| {
+            // Radius is biased toward the middle of the belt, which is roughly
+            // how the real population is distributed.
+            let u = random_unit(seed, index, 0);
+            let v = random_unit(seed, index, 1);
+            let bias = (u + v) * 0.5;
+            let radius = inner_au + (outer_au - inner_au) * bias;
+
+            let angle = random_unit(seed, index, 2) * std::f64::consts::TAU;
+            // Two samples summed approximate a normal distribution, so the belt
+            // is concentrated near the ecliptic with a scattered tail.
+            let height = (random_unit(seed, index, 3) + random_unit(seed, index, 4) - 1.0)
+                * thickness_au;
+
+            let position_au = DVec3::new(
+                radius * angle.cos(),
+                radius * angle.sin(),
+                height,
+            );
+            let scaled = scale.apply_to_position(position_au);
+
+            // Faint at the edges, brighter through the middle.
+            let edge = ((bias - 0.5).abs() * 2.0).clamp(0.0, 1.0);
+            let brightness = (1.0 - edge * edge) as f32;
+
+            BeltParticle {
+                position: ecliptic_to_scene(scaled),
+                size: (0.0016 + 0.0022 * random_unit(seed, index, 5)) as f32,
+                brightness: (0.25 + 0.75 * brightness) * brightness_scale,
+            }
+        })
+        .collect();
+
+    Belt {
+        name,
+        particles,
+        color,
+    }
+}
+
 /// Camera placement for a frame.
 #[derive(Debug, Clone, Copy)]
 pub struct CameraState {
@@ -98,8 +186,8 @@ pub struct Scene {
     pub camera: CameraState,
     /// Radius of the outermost drawn orbit, in scene units.
     pub extent: f32,
-    /// Inner and outer radius of the asteroid belt, if drawn.
-    pub asteroid_belt: Option<(f32, f32)>,
+    /// Debris belts, outermost last.
+    pub belts: Vec<Belt>,
 }
 
 impl Scene {
@@ -201,13 +289,45 @@ impl Scene {
             extent = sun.radius.max(0.1) * 4.0;
         }
 
-        let asteroid_belt = config.bodies.asteroid_belt.then(|| {
-            // The main belt runs roughly 2.1 to 3.3 AU.
-            (
-                orbit_scale.apply(2.1) as f32,
-                orbit_scale.apply(3.3) as f32,
-            )
-        });
+        let mut belts = Vec::new();
+        if config.bodies.asteroid_belt {
+            // The main belt runs roughly 2.1 to 3.3 AU, between Mars and Jupiter.
+            belts.push(build_belt(
+                "Asteroid Belt",
+                2.1,
+                3.3,
+                0.10,
+                config.bodies.belt_particles,
+                0xA57E_201D,
+                [0.72, 0.66, 0.56],
+                // The real main belt is invisible from anywhere. Drawn dense
+                // and additive it piles up into a solid glowing ring that
+                // out-shouts the Sun, so it is kept to a suggestion.
+                0.16,
+                orbit_scale,
+            ));
+        }
+        if config.bodies.kuiper_belt {
+            // The classical Kuiper belt runs from Neptune's orbit out to the
+            // 2:1 resonance at about 48 AU, and is far thicker than the main
+            // belt.
+            let kuiper = build_belt(
+                "Kuiper Belt",
+                30.0,
+                48.0,
+                2.4,
+                (config.bodies.belt_particles as f32 * 1.6) as u32,
+                0x4B1D_9E37,
+                [0.62, 0.70, 0.82],
+                // Spread over a far larger area, so it survives being brighter.
+                0.55,
+                orbit_scale,
+            );
+            for particle in &kuiper.particles {
+                extent = extent.max(particle.position.length());
+            }
+            belts.push(kuiper);
+        }
 
         // Everything the framing has to keep on screen. Bodies contribute the
         // extremes of their disc, not just their centre, so a planet is never
@@ -215,6 +335,14 @@ impl Scene {
         let framing_points: Vec<Vec3> = orbits_out
             .iter()
             .flat_map(|ring| ring.points.iter().copied())
+            .chain(
+                // Every 37th particle: enough to bound the belt without making
+                // the framing solve walk thirteen thousand points each frame.
+                belts
+                    .iter()
+                    .flat_map(|belt| belt.particles.iter().step_by(37))
+                    .map(|particle| particle.position),
+            )
             .chain(bodies_out.iter().flat_map(|body| {
                 [Vec3::X, Vec3::Y, Vec3::Z]
                     .into_iter()
@@ -236,7 +364,7 @@ impl Scene {
             orbits: orbits_out,
             camera,
             extent,
-            asteroid_belt,
+            belts,
         }
     }
 }
@@ -307,15 +435,58 @@ fn spin_orientation(data: &BodyData, epoch: JulianDate) -> Quat {
 /// the measured overshoot is very nearly a Newton step and converges in a
 /// handful of iterations.
 fn frame_camera(config: &Config, points: &[Vec3], extent: f32, aspect: f32) -> CameraState {
+    let camera = &config.camera;
+    let aspect = aspect.max(f32::EPSILON);
+    let fill = camera.fill.clamp(0.05, 1.0);
+
+    if !camera.fit_width || points.is_empty() {
+        return solve_at_elevation(config, points, extent, aspect, camera.elevation_deg, fill).0;
+    }
+
+    // Filling the width means the vertical extent is no longer free: seen from
+    // elevation e, a ring that spans the full width projects to roughly
+    // `fill * aspect * sin(e)` of the half-height. On a 21:9 monitor that
+    // exceeds the frame for any elevation above about 25 degrees, so the tilt
+    // has to come down with the aspect ratio rather than stay fixed.
+    const VERTICAL_LIMIT: f32 = 0.97;
+    let mut elevation = camera.elevation_deg;
+    let mut best = solve_at_elevation(config, points, extent, aspect, elevation, fill);
+
+    for _ in 0..48 {
+        if best.2 <= VERTICAL_LIMIT {
+            break;
+        }
+        // Shrink toward the plane. sin(e) is what scales the projected height,
+        // so scaling the elevation itself converges quickly and monotonically.
+        elevation *= 0.94;
+        if elevation < 1.0 {
+            break;
+        }
+        best = solve_at_elevation(config, points, extent, aspect, elevation, fill);
+    }
+
+    best.0
+}
+
+/// Place the camera at a given elevation and solve its distance.
+///
+/// Returns the camera plus the widest horizontal and vertical extents the
+/// geometry reaches, in normalised device coordinates.
+fn solve_at_elevation(
+    config: &Config,
+    points: &[Vec3],
+    extent: f32,
+    aspect: f32,
+    elevation_deg: f32,
+    fill: f32,
+) -> (CameraState, f32, f32) {
     const MAX_ITERATIONS: u32 = 40;
     const TOLERANCE: f32 = 1e-3;
 
     let camera = &config.camera;
-    let elevation = camera.elevation_deg.to_radians();
+    let elevation = elevation_deg.to_radians();
     let azimuth = camera.azimuth_deg.to_radians();
     let fov_y = camera.fov_deg.to_radians();
-    let fill = camera.fill.clamp(0.05, 1.0);
-    let aspect = aspect.max(f32::EPSILON);
 
     let direction = Vec3::new(
         elevation.cos() * azimuth.cos(),
@@ -324,77 +495,81 @@ fn frame_camera(config: &Config, points: &[Vec3], extent: f32, aspect: f32) -> C
     )
     .normalize_or(Vec3::Y);
 
-    // Shift the whole system within the frame by moving the look-at target
-    // across the camera's own screen axes.
     let forward = -direction;
     let right = forward.cross(Vec3::Y).normalize_or(Vec3::X);
     let up = right.cross(forward).normalize_or(Vec3::Y);
     let target = right * (camera.offset_x * extent) + up * (camera.offset_y * extent);
     let roll = Quat::from_axis_angle(forward, camera.roll_deg.to_radians());
 
-    // Never let the camera inside the geometry it is framing.
     let minimum_distance = extent * 1.05;
     let at_distance = |distance: f32| CameraState {
         eye: target + direction * distance,
         target,
         up: roll * up,
         fov_y_radians: fov_y,
-        // The reversed-Z infinite projection needs only a near plane; `far` is
-        // kept for anything that wants a finite bound.
         near: (distance * 0.001).max(1e-4),
         far: distance * 10.0,
     };
 
-    /// Widest the geometry reaches in normalised device coordinates, or `None`
-    /// if any of it is behind the camera.
-    fn widest_ndc(camera: &CameraState, points: &[Vec3], aspect: f32) -> Option<f32> {
+    /// Widest the geometry reaches on each axis, or `None` if any is behind.
+    fn measure(camera: &CameraState, points: &[Vec3], aspect: f32) -> Option<(f32, f32)> {
         let view_projection = camera.view_projection(aspect);
-        let mut widest: f32 = 0.0;
+        let (mut widest_x, mut widest_y) = (0.0_f32, 0.0_f32);
         for point in points {
             let clip = view_projection * point.extend(1.0);
             if clip.w <= 1e-6 {
                 return None;
             }
             let ndc = clip.truncate() / clip.w;
-            widest = widest.max(ndc.x.abs()).max(ndc.y.abs());
+            widest_x = widest_x.max(ndc.x.abs());
+            widest_y = widest_y.max(ndc.y.abs());
         }
-        Some(widest)
+        Some((widest_x, widest_y))
     }
 
-    // Seed with the flat-disc closed form, then correct.
     let half_fov_y = (fov_y * 0.5).tan();
     let half_fov_x = half_fov_y * aspect;
     let mut distance = (extent / (fill * half_fov_x))
         .max(extent * elevation.sin().abs().max(0.05) / (fill * half_fov_y))
         .max(minimum_distance);
 
-    if !points.is_empty() {
-        for _ in 0..MAX_ITERATIONS {
-            match widest_ndc(&at_distance(distance), points, aspect) {
-                // Some geometry is behind the camera: back off hard.
-                None => distance = (distance * 1.5).max(minimum_distance),
-                Some(widest) if widest > f32::EPSILON => {
-                    let correction = widest / fill;
-                    if (correction - 1.0).abs() < TOLERANCE {
-                        break;
-                    }
-                    distance = (distance * correction).max(minimum_distance);
-                }
-                Some(_) => break,
-            }
-        }
+    if points.is_empty() {
+        return (at_distance(distance * camera.zoom.max(0.01)), 0.0, 0.0);
+    }
 
-        // The iteration targets `fill` exactly, which can leave it a hair over.
-        // Expanding until it genuinely fits guarantees nothing is ever clipped.
-        for _ in 0..MAX_ITERATIONS {
-            match widest_ndc(&at_distance(distance), points, aspect) {
-                Some(widest) if widest <= fill => break,
-                _ => distance = (distance * 1.01).max(minimum_distance),
+    // Which axis the fit targets. Fitting the width uses only the horizontal
+    // extent; otherwise whichever axis binds first.
+    let measure_target =
+        |x: f32, y: f32| if config.camera.fit_width { x } else { x.max(y) };
+
+    for _ in 0..MAX_ITERATIONS {
+        match measure(&at_distance(distance), points, aspect) {
+            None => distance = (distance * 1.5).max(minimum_distance),
+            Some((x, y)) => {
+                let widest = measure_target(x, y);
+                if widest <= f32::EPSILON {
+                    break;
+                }
+                let correction = widest / fill;
+                if (correction - 1.0).abs() < TOLERANCE {
+                    break;
+                }
+                distance = (distance * correction).max(minimum_distance);
             }
         }
     }
 
-    at_distance(distance * camera.zoom.max(0.01))
+    // Expand until it genuinely fits, so nothing is ever clipped.
+    for _ in 0..MAX_ITERATIONS {
+        match measure(&at_distance(distance), points, aspect) {
+            Some((x, y)) if measure_target(x, y) <= fill && x <= 1.0 && y <= 1.0 => break,
+            _ => distance = (distance * 1.01).max(minimum_distance),
+        }
+    }
+
+    let final_camera = at_distance(distance * camera.zoom.max(0.01));
+    let (x, y) = measure(&final_camera, points, aspect).unwrap_or((0.0, 0.0));
+    (final_camera, x, y)
 }
 
 #[cfg(test)]
@@ -551,10 +726,18 @@ mod tests {
             let config = Config::default();
             let scene = Scene::build(&config, &Lookup::builtin(), EPOCH, aspect);
             let view_projection = scene.camera.view_projection(aspect);
+            // Belts count: with the Kuiper belt on it, not Neptune's orbit, is
+            // the outermost thing in the scene.
             let widest = scene
                 .orbits
                 .iter()
-                .flat_map(|o| o.points.iter())
+                .flat_map(|o| o.points.iter().copied())
+                .chain(
+                    scene
+                        .belts
+                        .iter()
+                        .flat_map(|b| b.particles.iter().map(|p| p.position)),
+                )
                 .map(|p| {
                     let clip = view_projection * p.extend(1.0);
                     let ndc = clip.truncate() / clip.w;
@@ -562,8 +745,8 @@ mod tests {
                 })
                 .fold(0.0_f32, f32::max);
             assert!(
-                widest > 0.6,
-                "aspect {aspect}: outermost orbit only reaches {widest} of the frame"
+                widest > 0.8,
+                "aspect {aspect}: the scene only reaches {widest} of the frame"
             );
         }
     }
@@ -583,10 +766,11 @@ mod tests {
         config.orbits.enabled = false;
         config.bodies.moon = false;
         config.bodies.asteroid_belt = false;
+        config.bodies.kuiper_belt = false;
         let scene = Scene::build(&config, &Lookup::builtin(), EPOCH, 1.6);
         assert!(scene.orbits.is_empty());
         assert!(!scene.bodies.iter().any(|b| b.name == "Moon"));
-        assert!(scene.asteroid_belt.is_none());
+        assert!(scene.belts.is_empty());
         // With no rings to frame against, the planets themselves must still fit.
         assert!(scene.extent > 0.0);
     }

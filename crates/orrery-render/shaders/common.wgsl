@@ -18,7 +18,8 @@ struct Globals {
     // angular size of one pixel in radians, star core radius in pixels,
     // constellation opacity, deep-sky opacity.
     sky_c: vec4<f32>,
-    // night-side brightness, night-side saturation, day-side saturation, unused.
+    // night-side brightness, night-side saturation, day-side saturation,
+    // Sun emission intensity.
     lighting: vec4<f32>,
 };
 
