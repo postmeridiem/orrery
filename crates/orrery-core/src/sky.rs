@@ -190,6 +190,66 @@ pub fn color_from_index(b_minus_v: f64) -> [f32; 3] {
     blackbody_color(temperature_from_color_index(b_minus_v))
 }
 
+/// Whether a constellation figure is worth drawing this frame.
+///
+/// A figure chopped by the frame edge does not read as a constellation; it
+/// reads as a few unexplained line fragments, which is worse than drawing
+/// nothing. Two tests decide it:
+///
+/// 1. **Behind the Sun.** The camera always looks at the Sun, so the sky
+///    directly behind it is the centre of the composition. A figure whose
+///    centre sits far off that axis is at the frame edge by definition.
+/// 2. **Mostly on screen.** Even a well-centred figure can be too large to
+///    fit, so most of its stars must actually project inside the frame.
+pub fn figure_is_visible(
+    segments: &[(Vec3, Vec3)],
+    view_projection: glam::Mat4,
+    forward: Vec3,
+    max_offset_deg: f32,
+    min_on_screen: f32,
+) -> bool {
+    if segments.is_empty() {
+        return false;
+    }
+
+    // The figure's centre, as a direction.
+    let mut sum = Vec3::ZERO;
+    for (a, b) in segments {
+        sum += *a + *b;
+    }
+    let Some(centre) = sum.try_normalize() else {
+        return false;
+    };
+
+    // Test 1: is it behind the Sun, within the allowed cone?
+    if centre.dot(forward) < max_offset_deg.to_radians().cos() {
+        return false;
+    }
+
+    // Test 2: how much of it actually lands inside the frame?
+    //
+    // Measured against an inset frame rather than the true edge, so a figure
+    // that qualifies is comfortably inside it. Testing against the exact edge
+    // makes figures blink in and out as the camera drifts.
+    const INSET: f32 = 0.94;
+    let mut inside = 0usize;
+    let mut total = 0usize;
+    for (a, b) in segments {
+        for endpoint in [a, b] {
+            total += 1;
+            let clip = view_projection * endpoint.extend(1.0);
+            if clip.w <= 0.0 {
+                continue;
+            }
+            let ndc = clip.truncate() / clip.w;
+            if ndc.x.abs() <= INSET && ndc.y.abs() <= INSET {
+                inside += 1;
+            }
+        }
+    }
+    inside as f32 / total as f32 >= min_on_screen
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum CatalogError {
     #[error("{file} line {line}: {reason}")]
@@ -510,6 +570,70 @@ mod tests {
         assert!(matches!(
             parse_constellations("abbr,name,a,b\nOri,Orion,1713,9999\n", &stars),
             Err(CatalogError::UnknownStar { hr: 9999, .. })
+        ));
+    }
+
+    /// A figure dead ahead and small must draw; the same figure behind the
+    /// camera must not, however well it would otherwise fit.
+    #[test]
+    fn figures_are_drawn_only_when_behind_the_sun() {
+        let forward = Vec3::NEG_Z;
+        let view = glam::Mat4::look_at_rh(Vec3::ZERO, forward, Vec3::Y);
+        let projection =
+            glam::Mat4::perspective_rh(40.0_f32.to_radians(), 1.6, 0.1, 10.0);
+        let view_projection = projection * view;
+
+        let ahead = [(
+            Vec3::new(-0.05, 0.0, -1.0).normalize(),
+            Vec3::new(0.05, 0.0, -1.0).normalize(),
+        )];
+        assert!(figure_is_visible(&ahead, view_projection, forward, 30.0, 0.8));
+
+        // Same shape, opposite hemisphere.
+        let behind = [(
+            Vec3::new(-0.05, 0.0, 1.0).normalize(),
+            Vec3::new(0.05, 0.0, 1.0).normalize(),
+        )];
+        assert!(!figure_is_visible(&behind, view_projection, forward, 30.0, 0.8));
+    }
+
+    /// A figure centred correctly but far too large to fit must be dropped
+    /// rather than drawn as fragments.
+    #[test]
+    fn oversized_figures_are_dropped() {
+        let forward = Vec3::NEG_Z;
+        let view = glam::Mat4::look_at_rh(Vec3::ZERO, forward, Vec3::Y);
+        let projection =
+            glam::Mat4::perspective_rh(20.0_f32.to_radians(), 1.6, 0.1, 10.0);
+        let view_projection = projection * view;
+
+        // Endpoints spread far wider than a 20-degree field can hold.
+        let sprawling: Vec<(Vec3, Vec3)> = (0..8)
+            .map(|i| {
+                let angle = (i as f32 - 3.5) * 0.35;
+                (
+                    Vec3::new(angle.sin(), 0.0, -angle.cos()),
+                    Vec3::new((angle + 0.2).sin(), 0.15, -(angle + 0.2).cos()),
+                )
+            })
+            .collect();
+        assert!(!figure_is_visible(
+            &sprawling,
+            view_projection,
+            forward,
+            60.0,
+            0.85
+        ));
+    }
+
+    #[test]
+    fn an_empty_figure_is_never_visible() {
+        assert!(!figure_is_visible(
+            &[],
+            glam::Mat4::IDENTITY,
+            Vec3::NEG_Z,
+            90.0,
+            0.0
         ));
     }
 

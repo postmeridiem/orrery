@@ -110,6 +110,16 @@ magnitude_limit = 6.5
 # turn the wallpaper into a star chart. Raise toward 0.5 to actually study them.
 constellations = true
 constellation_opacity = 0.10
+# A figure is drawn only when the whole of it is comfortably in view, and only
+# when it sits behind the Sun -- the camera always looks at the Sun, so that is
+# the middle of the picture. A constellation cut off by the frame edge does not
+# read as a constellation; it reads as a few stray lines, which is worse than
+# drawing nothing.
+#
+# How far a figure's centre may sit from the Sun and still be drawn, in degrees.
+constellation_max_offset_deg = 26.0
+# Fraction of a figure's stars that must be on screen. 1.0 demands all of it.
+constellation_min_on_screen = 1.0
 
 # 23 curated deep-sky objects at their true positions -- Orion, Andromeda, the
 # Pleiades, the Magellanic Clouds and so on. Curated rather than exhaustive,

@@ -168,6 +168,9 @@ struct Celestial {
     _deep_sky: wgpu::Buffer,
     deep_sky_count: u32,
     bind_group: wgpu::BindGroup,
+    /// Segments grouped by figure, so whole constellations can be shown or
+    /// hidden as a unit rather than clipped mid-shape.
+    figures: Vec<Vec<(glam::Vec3, glam::Vec3)>>,
 }
 
 #[repr(C)]
@@ -879,15 +882,16 @@ impl Renderer {
             })
             .collect();
 
-        let segments: Vec<GpuSegment> = catalog
+        let figures: Vec<Vec<(glam::Vec3, glam::Vec3)>> = catalog
             .constellations
             .iter()
-            .flat_map(|figure| figure.segments.iter())
-            .map(|(a, b)| GpuSegment {
-                endpoint_a: [a.x, a.y, a.z, 0.0],
-                endpoint_b: [b.x, b.y, b.z, 0.0],
-            })
+            .map(|figure| figure.segments.clone())
             .collect();
+        // Sized for the whole catalogue; only the visible figures are ever
+        // written into it.
+        let segment_capacity: usize = figures.iter().map(Vec::len).sum();
+        let segments = vec![GpuSegment { endpoint_a: [0.0; 4], endpoint_b: [0.0; 4] };
+            segment_capacity.max(1)];
 
         let deep_sky: Vec<GpuDeepSky> = catalog
             .deep_sky
@@ -927,11 +931,12 @@ impl Renderer {
         };
 
         let star_buffer = upload("stars", bytemuck::cast_slice(&stars), size_of::<GpuStar>());
-        let segment_buffer = upload(
-            "constellation segments",
-            bytemuck::cast_slice(&segments),
-            size_of::<GpuSegment>(),
-        );
+        let segment_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("constellation segments"),
+            size: (segments.len() * size_of::<GpuSegment>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let deep_sky_buffer = upload(
             "deep sky",
             bytemuck::cast_slice(&deep_sky),
@@ -961,11 +966,67 @@ impl Renderer {
             _stars: star_buffer,
             star_count: stars.len() as u32,
             _segments: segment_buffer,
-            segment_count: segments.len() as u32,
+            // Nothing is drawn until the first frame decides what is visible.
+            segment_count: 0,
             _deep_sky: deep_sky_buffer,
             deep_sky_count: deep_sky.len() as u32,
             bind_group,
+            figures,
         });
+    }
+
+    /// Choose which constellation figures to draw, and pack only those.
+    ///
+    /// Re-evaluated every frame because the camera drifts. Whole figures are
+    /// kept or dropped together: a figure cut off by the frame edge reads as
+    /// stray lines rather than as a constellation, which is worse than showing
+    /// nothing.
+    fn select_visible_figures(&mut self, queue: &wgpu::Queue, scene: &Scene, config: &Config) {
+        let Some(celestial) = &mut self.celestial else {
+            return;
+        };
+        if !config.sky.constellations {
+            celestial.segment_count = 0;
+            return;
+        }
+
+        let aspect = self.targets.width as f32 / self.targets.height.max(1) as f32;
+        let view_projection = scene.camera.view_projection(aspect);
+        // The camera looks at the Sun, so this axis is "behind the Sun".
+        let forward = (scene.camera.target - scene.camera.eye).normalize_or(glam::Vec3::NEG_Z);
+
+        // The shader rotates catalogue directions by the sky rotation, so the
+        // visibility test has to see the same orientation.
+        let rotation = config.sky.rotation_deg.to_radians();
+        let (sin, cos) = rotation.sin_cos();
+        let orient = |v: glam::Vec3| {
+            glam::Vec3::new(v.x * cos + v.z * sin, v.y, -v.x * sin + v.z * cos)
+        };
+
+        let mut packed: Vec<GpuSegment> = Vec::new();
+        for figure in &celestial.figures {
+            let oriented: Vec<(glam::Vec3, glam::Vec3)> =
+                figure.iter().map(|(a, b)| (orient(*a), orient(*b))).collect();
+            if !orrery_core::sky::figure_is_visible(
+                &oriented,
+                view_projection,
+                forward,
+                config.sky.constellation_max_offset_deg,
+                config.sky.constellation_min_on_screen,
+            ) {
+                continue;
+            }
+            // Store the unrotated endpoints; the shader applies the rotation.
+            packed.extend(figure.iter().map(|(a, b)| GpuSegment {
+                endpoint_a: [a.x, a.y, a.z, 0.0],
+                endpoint_b: [b.x, b.y, b.z, 0.0],
+            }));
+        }
+
+        celestial.segment_count = packed.len() as u32;
+        if !packed.is_empty() {
+            queue.write_buffer(&celestial._segments, 0, bytemuck::cast_slice(&packed));
+        }
     }
 
     pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
@@ -1008,6 +1069,7 @@ impl Renderer {
         let (sphere_instances, ring_instances) = self.upload_instances(device, queue, scene);
         self.upload_orbits(device, queue, scene, config);
         self.upload_belts(device, queue, scene);
+        self.select_visible_figures(queue, scene, config);
 
         queue.write_buffer(
             &self.tonemap_settings,
