@@ -8,6 +8,7 @@ pub mod bodies;
 pub mod config;
 pub mod ephemeris;
 pub mod scale;
+pub mod scene;
 pub mod time;
 
 pub use ephemeris::Planet;
