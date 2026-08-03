@@ -114,9 +114,30 @@ fn constellation_vertex(
     let a = project_sky(oriented(segment.endpoint_a.xyz));
     let b = project_sky(oriented(segment.endpoint_b.xyz));
 
+    var out: LineVertex;
+
+    // Cull any segment with an endpoint at or behind the camera.
+    //
+    // The celestial sphere surrounds the viewer, so about half of it is behind
+    // the camera at any moment and plenty of segments straddle the plane.
+    // Clamping a negative w to a small positive one -- which is what this used
+    // to do -- projects that endpoint to a garbage coordinate, and the quad
+    // then runs from a valid on-screen vertex to a nonsensical one. The
+    // near-plane clip stretches the result clean across the frame, which is
+    // where the stray lines came from.
+    //
+    // Nothing is lost by dropping them: an endpoint behind the camera is more
+    // than 90 degrees off-axis, and the field of view is 38.
+    if (a.w <= 1e-4 || b.w <= 1e-4) {
+        // Outside the depth range, so it is clipped rather than drawn.
+        out.clip_position = vec4<f32>(0.0, 0.0, -1.0, 1.0);
+        out.across = 0.0;
+        return out;
+    }
+
     let viewport = vec2<f32>(globals.viewport.x, globals.viewport.y);
-    let pixels_a = a.xy / max(a.w, 1e-6) * viewport;
-    let pixels_b = b.xy / max(b.w, 1e-6) * viewport;
+    let pixels_a = a.xy / a.w * viewport;
+    let pixels_b = b.xy / b.w * viewport;
 
     var along = pixels_b - pixels_a;
     let length_squared = dot(along, along);
@@ -135,7 +156,6 @@ fn constellation_vertex(
     let half_width = 0.75;
     let position = endpoint + across * corner.y * half_width;
 
-    var out: LineVertex;
     out.clip_position = vec4<f32>(position / viewport * clip.w, clip.z, clip.w);
     out.across = corner.y;
     return out;
