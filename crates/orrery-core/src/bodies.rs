@@ -123,7 +123,7 @@ pub const fn data(planet: Planet) -> BodyData {
                 inner_radius: 1.239,
                 outer_radius: 2.269,
                 color: [0.86, 0.80, 0.70],
-                opacity: 0.62,
+                opacity: 0.75,
             }),
         },
         Planet::Uranus => BodyData {

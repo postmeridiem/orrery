@@ -126,7 +126,7 @@ pub struct BodyScale {
 impl Default for BodyScale {
     fn default() -> Self {
         Self {
-            earth_radius_units: 0.022,
+            earth_radius_units: 0.027,
             exponent: 0.4,
             sun_multiplier: 0.85,
         }

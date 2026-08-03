@@ -1,0 +1,32 @@
+[package]
+name = "orrery-app"
+description = "Animated solar-system orrery for the desktop background."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "orrery"
+path = "src/main.rs"
+
+[dependencies]
+orrery-core.workspace = true
+orrery-render.workspace = true
+anyhow.workspace = true
+bytemuck.workspace = true
+env_logger.workspace = true
+log.workspace = true
+notify.workspace = true
+pollster.workspace = true
+wgpu.workspace = true
+winit.workspace = true
+png = "0.18"
+
+# macOS has no wallpaper-plugin API, so the window is placed at the desktop
+# level directly. Developed against the AppKit docs but unverified on hardware.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = "0.3"
+objc2-core-graphics = "0.3"
+raw-window-handle = "0.6"

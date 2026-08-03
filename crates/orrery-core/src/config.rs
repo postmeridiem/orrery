@@ -79,9 +79,17 @@ pub struct Time {
     /// Starting date, `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM:SS`, UTC. Ignored in
     /// live mode unless `speed` is non-default.
     pub date: Option<String>,
-    /// Simulated days per real second. `0` means real time — the planets move
-    /// at their true rate, which is imperceptible but genuinely correct.
-    /// Raise it to watch the system actually turn.
+    /// Simulated days per real second.
+    ///
+    /// `0` is real time: the orrery then shows the true configuration of the
+    /// solar system at this moment, continuously. Motion at that rate is
+    /// imperceptible over a glance — the visible movement comes from the slow
+    /// camera drift and from the planets' own rotation.
+    ///
+    /// Raise it to watch the system actually turn: `1` advances a day a second,
+    /// so Mercury laps its orbit in about a minute and a half. Anything
+    /// non-zero means what is on screen is the real solar system at some *other*
+    /// time, which is why the default is 0.
     pub days_per_second: f64,
 }
 
@@ -90,9 +98,7 @@ impl Default for Time {
         Self {
             mode: TimeMode::Live,
             date: None,
-            // Slow enough to look still at a glance, fast enough that the inner
-            // planets visibly move if you watch for a minute.
-            days_per_second: 0.5,
+            days_per_second: 0.0,
         }
     }
 }
