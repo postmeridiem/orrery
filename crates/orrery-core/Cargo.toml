@@ -1,0 +1,13 @@
+[package]
+name = "orrery-core"
+description = "Ephemeris, scene layout and configuration for the orrery wallpaper. No GPU, no platform dependencies."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+glam.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+toml.workspace = true

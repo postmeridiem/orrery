@@ -1,0 +1,7 @@
+/target
+**/*.rs.bk
+*.pdb
+
+# Local, machine-specific config (the shipped default lives in config/)
+/orrery.local.toml
+.DS_Store
