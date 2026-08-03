@@ -61,8 +61,9 @@ pub fn sphere(segments: u32, rings: u32) -> Mesh {
         for segment in 0..segments {
             let a = ring * stride + segment;
             let b = a + stride;
-            // Counter-clockwise when seen from outside.
-            indices.extend_from_slice(&[a, b, a + 1, a + 1, b, b + 1]);
+            // Counter-clockwise seen from outside, which is what the default
+            // front face and back-face culling expect.
+            indices.extend_from_slice(&[a, a + 1, b, a + 1, b + 1, b]);
         }
     }
 
@@ -135,8 +136,14 @@ mod tests {
                 .map(|i| glam::Vec3::from(mesh.vertices[*i as usize].position))
                 .collect();
             let normal = (p[1] - p[0]).cross(p[2] - p[0]);
-            // Degenerate triangles occur at the poles; skip them.
-            if normal.length() < 1e-9 {
+            // Both poles collapse a whole ring of vertices to one point, so the
+            // triangles there are degenerate and their winding is meaningless.
+            // The threshold has to be generous: `sin(PI)` is 8.7e-8 in f32
+            // rather than 0, so the south-pole triangles have a small but very
+            // much non-zero area whose normal is pure rounding noise. Genuine
+            // triangles on this mesh have normals around 5e-2, so 1e-4
+            // separates the two cleanly.
+            if normal.length() < 1e-4 {
                 continue;
             }
             let centroid = (p[0] + p[1] + p[2]) / 3.0;
