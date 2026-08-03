@@ -333,7 +333,6 @@ impl Scene {
             belts.push(kuiper);
         }
 
-        #[allow(unused)]
         let framing_points: Vec<Vec3> = orbits_out
             .iter()
             .flat_map(|ring| ring.points.iter().copied())
@@ -374,7 +373,8 @@ impl Scene {
             extent
         };
 
-        let camera = frame_camera(config, framing_radius, extent, aspect);
+        let _ = framing_radius;
+        let camera = frame_camera(config, &framing_points, extent, aspect);
 
         Scene {
             epoch,
@@ -440,38 +440,41 @@ fn spin_orientation(data: &BodyData, epoch: JulianDate) -> Quat {
     tilt * Quat::from_rotation_y(spin as f32)
 }
 
-/// Place the camera so that `framing_radius` lands on the left and right edges
-/// of the frame.
+/// Place the camera so the whole scene fits the frame's width, then apply
+/// `zoom` to crop in.
 ///
-/// Closed form, deliberately. Earlier versions searched for a distance that
-/// contained every point, then searched again for an elevation that made the
-/// result fit vertically. Neither search is stable: the projected size of a
-/// ring is dominated by its *near* side, which grows without bound as the
-/// camera approaches, so the two searches fought each other and the answer
-/// jumped around as the camera orbited. Stating the radius and solving directly
-/// gives one answer that does not move.
+/// Two halves, and it matters that they are solved differently.
 ///
-/// A point at `framing_radius` perpendicular to the view direction sits at
-/// `atan(r / d)` off axis, so putting it at `fill` of the half-width means
-/// `d = r / (fill * tan(half_fov_x))`.
-fn frame_camera(config: &Config, framing_radius: f32, extent: f32, aspect: f32) -> CameraState {
+/// The **elevation** is a closed form of the aspect ratio alone. Searching for
+/// it against the geometry was unstable -- lowering the elevation flattens the
+/// disc, which lets the camera move closer, which magnifies the vertical extent
+/// again -- so the answer moved as the camera orbited and the view visibly
+/// snapped between angles.
+///
+/// The **distance** is solved against the real projected geometry, because a
+/// closed form has to treat the system as a flat disc and ignores the fact that
+/// the near side of a ring projects far larger than its far side. Iterating
+/// here is stable: projected size falls monotonically with distance, so scaling
+/// by the measured overshoot converges in a few steps.
+///
+/// `zoom` below 1 then crops in on the result, which is how the scene is framed
+/// tighter than "everything just fits" without changing the angle or the
+/// centring.
+fn frame_camera(config: &Config, points: &[Vec3], extent: f32, aspect: f32) -> CameraState {
+    const MAX_ITERATIONS: u32 = 48;
+    const TOLERANCE: f32 = 1e-3;
+
     let camera = &config.camera;
     let aspect = aspect.max(f32::EPSILON);
     let fill = camera.fill.clamp(0.05, 1.0);
     let fov_y = camera.fov_deg.to_radians();
 
-    // Seen from elevation e, a ring spanning the full width projects to about
-    // `fill * aspect * sin(e)` of the half-height, so this is the steepest
-    // elevation that still fits vertically. Depending only on the aspect ratio,
-    // it is constant for a given screen and cannot vary as the camera turns.
+    // Steepest elevation whose vertical extent still fits, from the aspect
+    // ratio alone. Constant for a given screen, so it cannot vary as the camera
+    // turns.
     let steepest = (1.0 / (fill * aspect)).clamp(-1.0, 1.0).asin().to_degrees();
-    let elevation_deg = camera.elevation_deg.min(steepest);
-
-    let elevation = elevation_deg.to_radians();
+    let elevation = camera.elevation_deg.min(steepest).to_radians();
     let azimuth = camera.azimuth_deg.to_radians();
-
-    let half_fov_x = (fov_y * 0.5).tan() * aspect;
-    let distance = (framing_radius / (fill * half_fov_x)).max(1e-3) * camera.zoom.max(0.01);
 
     let direction = Vec3::new(
         elevation.cos() * azimuth.cos(),
@@ -481,27 +484,58 @@ fn frame_camera(config: &Config, framing_radius: f32, extent: f32, aspect: f32) 
     .normalize_or(Vec3::Y);
 
     let forward = -direction;
-    // Derived from the azimuth rather than from `forward x up`, which
-    // degenerates at the poles.
-    // This is `normalize(forward x world_up)`, written out in terms of the
-    // azimuth because the cross product degenerates when the camera is directly
-    // over a pole. Getting its sign wrong negates `up` too, which rotates the
-    // whole picture 180 degrees -- subtle on a near-symmetric scene, but it puts
-    // the near edge of every ring at the top instead of the bottom, so the
-    // orbits appear to climb away from the ecliptic as they go outward.
+    // `normalize(forward x world_up)`, written out in terms of the azimuth
+    // because the cross product degenerates over the poles. Its sign matters:
+    // negating it negates `up` too and rotates the picture 180 degrees.
     let right = Vec3::new(azimuth.sin(), 0.0, -azimuth.cos());
     let up = right.cross(forward).normalize_or(Vec3::Y);
     let target = right * (camera.offset_x * extent) + up * (camera.offset_y * extent);
     let roll = Quat::from_axis_angle(forward, camera.roll_deg.to_radians());
 
-    CameraState {
+    let at_distance = |distance: f32| CameraState {
         eye: target + direction * distance,
         target,
         up: roll * up,
         fov_y_radians: fov_y,
         near: (distance * 0.001).max(1e-4),
         far: distance * 10.0,
+    };
+
+    /// Widest the geometry reaches on each axis, or `None` if any is behind.
+    fn measure(camera: &CameraState, points: &[Vec3], aspect: f32) -> Option<(f32, f32)> {
+        let view_projection = camera.view_projection(aspect);
+        let (mut x, mut y) = (0.0_f32, 0.0_f32);
+        for point in points {
+            let clip = view_projection * point.extend(1.0);
+            if clip.w <= 1e-6 {
+                return None;
+            }
+            let ndc = clip.truncate() / clip.w;
+            x = x.max(ndc.x.abs());
+            y = y.max(ndc.y.abs());
+        }
+        Some((x, y))
     }
+
+    let half_fov_x = (fov_y * 0.5).tan() * aspect;
+    let mut distance = (extent / (fill * half_fov_x)).max(extent * 1.05);
+
+    if !points.is_empty() {
+        for _ in 0..MAX_ITERATIONS {
+            let Some((x, y)) = measure(&at_distance(distance), points, aspect) else {
+                distance *= 1.5;
+                continue;
+            };
+            // Fit the width, but never let anything leave the frame entirely.
+            let overshoot = (x / fill).max(x).max(y);
+            if (overshoot - 1.0).abs() < TOLERANCE {
+                break;
+            }
+            distance = (distance * overshoot).max(extent * 1.05);
+        }
+    }
+
+    at_distance(distance * camera.zoom.max(0.01))
 }
 
 #[cfg(test)]

@@ -118,7 +118,12 @@ pub struct Camera {
     pub roll_deg: f32,
     /// Vertical field of view, degrees.
     pub fov_deg: f32,
-    /// Multiplier on the auto-computed framing distance. Above 1 pulls back.
+    /// Multiplier on the framing distance. Below 1 crops in, above 1 pulls back.
+    ///
+    /// The framing puts the whole scene just inside the frame, which leaves the
+    /// Kuiper belt's extremes sitting exactly at the edges and a fair amount of
+    /// empty sky. Cropping in past that is what makes the belt run off the
+    /// sides and gives the planets the middle of the picture.
     pub zoom: f32,
     /// Minutes for the camera to travel once around the Sun. Zero holds still.
     ///
@@ -169,15 +174,15 @@ pub struct Camera {
 impl Default for Camera {
     fn default() -> Self {
         Self {
-            elevation_deg: 6.0,
+            elevation_deg: 27.0,
             azimuth_deg: 0.0,
             roll_deg: 0.0,
-            fov_deg: 36.0,
-            zoom: 1.0,
+            fov_deg: 55.0,
+            zoom: 0.785,
             rotation_period_minutes: 60.0,
             elevation_cycle_days: 0.0,
             elevation_cycle_deg: 40.0,
-            fill: 0.80,
+            fill: 0.94,
             frame_belt_fraction: 0.5,
             fit_width: true,
             offset_x: 0.0,
