@@ -480,3 +480,23 @@ mod tests {
         assert!((epoch.0 - 2_461_255.5).abs() < 1e-3);
     }
 }
+
+/// The shipped `config/orrery.toml` documents every default in prose. Prose
+/// drifts, so this checks it against the real thing.
+#[cfg(test)]
+mod shipped_config {
+    use super::Config;
+
+    #[test]
+    fn shipped_file_parses_and_equals_the_defaults() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/orrery.toml");
+        let text = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("reading {path}: {e}"));
+        let from_file = Config::from_toml(&text).expect("shipped config must be valid");
+        assert_eq!(
+            from_file,
+            Config::default(),
+            "config/orrery.toml has drifted from the built-in defaults"
+        );
+    }
+}

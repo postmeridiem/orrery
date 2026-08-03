@@ -1,0 +1,122 @@
+# Orrery configuration.
+#
+# Every value below is the shipped default, so deleting this file changes
+# nothing. Any key may be omitted. Unknown keys are an error rather than being
+# silently ignored, because a wallpaper has no console to complain to.
+#
+# The renderer re-reads this file whenever it is saved.
+
+[camera]
+# Angle above the ecliptic plane. 90 looks straight down on the solar system,
+# 0 is edge-on. The default is the oblique three-quarter view that makes the
+# orbits read as ellipses rather than circles.
+elevation_deg = 27.0
+# Rotation about the ecliptic pole: spins the whole system within the frame.
+azimuth_deg = 0.0
+# Roll about the view axis: tilts the horizon.
+roll_deg = 0.0
+fov_deg = 38.0
+# Multiplier on the automatically computed framing distance. Above 1 pulls back.
+zoom = 1.0
+# Slow drift of the azimuth. This is where most of the visible motion comes
+# from, since the planets themselves move imperceptibly in real time.
+orbit_speed_deg_per_hour = 1.5
+# Fraction of the frame the outermost orbit spans. Honoured exactly, at every
+# aspect ratio.
+fill = 0.86
+# Shift the system within the frame, in fractions of the viewport. Handy for
+# keeping the Sun out from behind a column of desktop icons.
+offset_x = 0.0
+offset_y = 0.0
+
+[time]
+# "live" tracks the clock; "fixed" freezes at `date`.
+mode = "live"
+# Optional, "YYYY-MM-DD" or "YYYY-MM-DDTHH:MM:SS", UTC.
+# date = "2026-08-03"
+
+# Simulated days per real second.
+#
+# 0 is real time: what you see is the true configuration of the solar system at
+# this moment. Anything else means the picture is the real solar system at some
+# *other* time, which is why the default is 0.
+#
+# Set it to 1 to watch the system actually turn -- Mercury laps its orbit in
+# about ninety seconds.
+days_per_second = 0.0
+
+[scale.orbit]
+# How heliocentric distance becomes distance on screen. Only the radius is ever
+# rescaled, never the direction, so every planet's heliocentric longitude and
+# latitude -- and so every conjunction and alignment -- stays exact.
+#
+#   law = "linear"       true to scale; needs `zoom` to frame the inner system
+#   law = "power"        r^exponent; the classic orrery compression
+#   law = "logarithmic"  more aggressive in the outer system
+#
+# Neptune orbits 78 times further out than Mercury. Drawn honestly with Neptune
+# in frame, the terrestrial planets are a smudge, which is what the default
+# compression exists to fix.
+law = "power"
+units_per_au = 1.0
+exponent = 0.45
+
+# For true scale instead:
+#   law = "linear"
+#   units_per_au = 1.0
+
+[scale.body]
+# Drawn radius of an Earth-sized body, in scene units. Earth's true radius is
+# 4.3e-5 AU, so at any framing that shows the orbits, real sizes are sub-pixel.
+earth_radius_units = 0.027
+# 1.0 keeps true relative sizes (Jupiter 11x Earth); lower pulls them together.
+exponent = 0.4
+# The Sun alone is 109 Earth radii and tends to dominate; this dials it back
+# without touching the planets.
+sun_multiplier = 0.85
+
+[sky]
+# Change this for an entirely different sky. Any value is as good as any other.
+seed = 186081005
+star_density = 1.0
+star_brightness = 1.0
+# The galactic band is placed using the real IAU galactic pole, so it crosses
+# the solar system at its true angle of roughly 60 degrees to the ecliptic.
+milky_way = 0.85
+nebula = 0.55
+# Lifts the darkest sky off pure black, and faintly lights the night side of
+# each planet.
+ambient = 0.015
+rotation_deg = 0.0
+
+[orbits]
+enabled = true
+width_px = 1.4
+opacity = 0.34
+# How much brighter the ring is just behind each planet, which gives a sense of
+# which way it is travelling. 0 draws a uniform ring.
+trail_strength = 2.2
+trail_length = 0.22
+segments = 512
+
+[render]
+# A wallpaper has no business running at the display's refresh rate.
+fps = 30
+# 1, 2, 4 or 8.
+msaa = 4
+exposure_stops = 0.0
+bloom_intensity = 0.09
+bloom_radius = 0.06
+vsync = true
+resolution_scale = 1.0
+
+[bodies]
+# Case-insensitive. Pluto is off by default: it is not a planet, and its 17
+# degree inclination sits it awkwardly outside the plane of the others.
+show = ["Mercury", "Venus", "Earth", "Mars", "Jupiter", "Saturn", "Uranus", "Neptune"]
+moon = true
+# The Moon's true separation collapses to nothing under any useful compression,
+# so it is pushed out to stay visible. Its *direction* from Earth is still the
+# real one, so the phase and the side it sits on read correctly.
+moon_distance_boost = 3.5
+asteroid_belt = true

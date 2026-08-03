@@ -1,0 +1,19 @@
+{
+    "KPackageStructure": "Plasma/Wallpaper",
+    "KPlugin": {
+        "Authors": [
+            {
+                "Email": "jpmschweitzer@gmail.com",
+                "Name": "Jeroen Schweitzer"
+            }
+        ],
+        "Category": "",
+        "Description": "An astronomically accurate, animated solar system",
+        "Icon": "kstars",
+        "Id": "net.schweitz.orrery",
+        "License": "MIT",
+        "Name": "Orrery",
+        "Version": "0.1.0"
+    },
+    "X-KDE-ParentApp": "org.kde.plasmashell"
+}
