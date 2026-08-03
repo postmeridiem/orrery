@@ -15,7 +15,7 @@ elevation_deg = 27.0
 azimuth_deg = 0.0
 # Roll about the view axis: tilts the horizon.
 roll_deg = 0.0
-fov_deg = 55.0
+fov_deg = 50.0
 # Multiplier on the automatically computed framing distance. Above 1 pulls back.
 zoom = 1.0
 # Minutes for the camera to travel once around the Sun. Zero holds still.
@@ -39,6 +39,18 @@ elevation_cycle_deg = 40.0
 # Fraction of the frame the outermost drawn thing spans. Honoured exactly, at
 # every aspect ratio.
 fill = 0.94
+# Where through each debris belt the left and right screen edges fall, as a
+# fraction of the belt's width. 0.5 puts them on the middle of the Kuiper belt,
+# so its outer half runs off the sides. That is what stops the belt dictating
+# the scale of the whole picture and crushing the planets into the centre.
+#
+# It does mean the camera sits within the belt rather than outside it, and that
+# the outermost orbit sweeps off the edges. That is unavoidable rather than a
+# defect: the near side of an outer orbit is always far closer to the camera
+# than the far side, so containing it entirely means retreating until
+# everything is tiny. Raise this to pull back, lower it to come closer.
+frame_belt_fraction = 0.5
+
 # Fit to the frame's *width* rather than to whichever axis binds first.
 #
 # On a wide monitor the solar system is far wider than it is tall, so fitting

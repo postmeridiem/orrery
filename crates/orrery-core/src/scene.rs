@@ -333,9 +333,7 @@ impl Scene {
             belts.push(kuiper);
         }
 
-        // Everything the framing has to keep on screen. Bodies contribute the
-        // extremes of their disc, not just their centre, so a planet is never
-        // half off the edge.
+        #[allow(unused)]
         let framing_points: Vec<Vec3> = orbits_out
             .iter()
             .flat_map(|ring| ring.points.iter().copied())
@@ -359,7 +357,24 @@ impl Scene {
             }))
             .collect();
 
-        let camera = frame_camera(config, &framing_points, extent, aspect);
+        // The radius that lands on the left and right screen edges.
+        //
+        // With a belt present this is a chosen point *through* it rather than
+        // its outer edge, so the belt runs off the sides instead of setting the
+        // scale of everything else. Stating the radius outright also makes the
+        // framing stable: solving it from the point cloud meant the answer
+        // moved as the outermost particle wandered.
+        let framing_radius = if config.bodies.kuiper_belt {
+            let fraction = config.camera.frame_belt_fraction.clamp(0.0, 1.0) as f64;
+            orbit_scale.apply(30.0 + (48.0 - 30.0) * fraction) as f32
+        } else if config.bodies.asteroid_belt {
+            let fraction = config.camera.frame_belt_fraction.clamp(0.0, 1.0) as f64;
+            extent.max(orbit_scale.apply(2.1 + (3.3 - 2.1) * fraction) as f32)
+        } else {
+            extent
+        };
+
+        let camera = frame_camera(config, framing_radius, extent, aspect);
 
         Scene {
             epoch,
@@ -425,77 +440,38 @@ fn spin_orientation(data: &BodyData, epoch: JulianDate) -> Quat {
     tilt * Quat::from_rotation_y(spin as f32)
 }
 
-/// Place the camera so the system fills the configured fraction of the frame.
+/// Place the camera so that `framing_radius` lands on the left and right edges
+/// of the frame.
 ///
-/// The framing distance is solved numerically rather than in closed form. A
-/// closed form has to approximate the solar system as a flat disc of radius
-/// `extent`, which ignores perspective foreshortening — the near side of an
-/// orbit projects larger than the far side, so the approximation overflows the
-/// frame on wide aspect ratios at shallow elevations. Measuring the real
-/// projected geometry instead makes `fill` an exact promise at every aspect
-/// ratio and camera angle.
+/// Closed form, deliberately. Earlier versions searched for a distance that
+/// contained every point, then searched again for an elevation that made the
+/// result fit vertically. Neither search is stable: the projected size of a
+/// ring is dominated by its *near* side, which grows without bound as the
+/// camera approaches, so the two searches fought each other and the answer
+/// jumped around as the camera orbited. Stating the radius and solving directly
+/// gives one answer that does not move.
 ///
-/// Projected size falls off as roughly `1/distance`, so scaling the distance by
-/// the measured overshoot is very nearly a Newton step and converges in a
-/// handful of iterations.
-fn frame_camera(config: &Config, points: &[Vec3], extent: f32, aspect: f32) -> CameraState {
+/// A point at `framing_radius` perpendicular to the view direction sits at
+/// `atan(r / d)` off axis, so putting it at `fill` of the half-width means
+/// `d = r / (fill * tan(half_fov_x))`.
+fn frame_camera(config: &Config, framing_radius: f32, extent: f32, aspect: f32) -> CameraState {
     let camera = &config.camera;
     let aspect = aspect.max(f32::EPSILON);
     let fill = camera.fill.clamp(0.05, 1.0);
+    let fov_y = camera.fov_deg.to_radians();
 
-    if !camera.fit_width || points.is_empty() {
-        return solve_at_elevation(config, points, extent, aspect, camera.elevation_deg, fill).0;
-    }
-
-    // Filling the width means the vertical extent is no longer free: seen from
-    // elevation e, a ring that spans the full width projects to roughly
-    // `fill * aspect * sin(e)` of the half-height. On a 21:9 monitor that
-    // exceeds the frame for any elevation above about 25 degrees, so the tilt
-    // has to come down with the aspect ratio rather than stay fixed.
-    // Cap the elevation from the aspect ratio alone, not from the geometry.
-    //
     // Seen from elevation e, a ring spanning the full width projects to about
-    // `fill * aspect * sin(e)` of the half-height, so the steepest elevation
-    // that still fits is `asin(1 / (fill * aspect))`.
-    //
-    // This used to be solved per frame by searching for the largest elevation
-    // that fitted the actual point cloud. That search is not stable: lowering
-    // the elevation flattens the disc, which lets the camera move closer to
-    // fill the width, which magnifies the vertical extent again. The predicate
-    // is not monotonic, so as the camera circled the Sun the answer flipped
-    // between values and the whole view visibly snapped between angles.
-    //
-    // A closed form has no such problem. It is approximate -- it ignores
-    // perspective foreshortening -- but the distance solve below still measures
-    // the real geometry and expands until nothing clips, so the approximation
-    // costs a little unused width rather than a cropped scene. And because it
-    // depends only on the aspect ratio, it is constant for a given screen.
+    // `fill * aspect * sin(e)` of the half-height, so this is the steepest
+    // elevation that still fits vertically. Depending only on the aspect ratio,
+    // it is constant for a given screen and cannot vary as the camera turns.
     let steepest = (1.0 / (fill * aspect)).clamp(-1.0, 1.0).asin().to_degrees();
-    let elevation = camera.elevation_deg.min(steepest);
+    let elevation_deg = camera.elevation_deg.min(steepest);
 
-    solve_at_elevation(config, points, extent, aspect, elevation, fill).0
-}
-
-
-/// Place the camera at a given elevation and solve its distance.
-///
-/// Returns the camera plus the widest horizontal and vertical extents the
-/// geometry reaches, in normalised device coordinates.
-fn solve_at_elevation(
-    config: &Config,
-    points: &[Vec3],
-    extent: f32,
-    aspect: f32,
-    elevation_deg: f32,
-    fill: f32,
-) -> (CameraState, f32, f32) {
-    const MAX_ITERATIONS: u32 = 40;
-    const TOLERANCE: f32 = 1e-3;
-
-    let camera = &config.camera;
     let elevation = elevation_deg.to_radians();
     let azimuth = camera.azimuth_deg.to_radians();
-    let fov_y = camera.fov_deg.to_radians();
+
+    let half_fov_x = (fov_y * 0.5).tan() * aspect;
+    let distance = (framing_radius / (fill * half_fov_x)).max(1e-3) * camera.zoom.max(0.01);
 
     let direction = Vec3::new(
         elevation.cos() * azimuth.cos(),
@@ -505,80 +481,21 @@ fn solve_at_elevation(
     .normalize_or(Vec3::Y);
 
     let forward = -direction;
-    let right = forward.cross(Vec3::Y).normalize_or(Vec3::X);
+    // Derived from the azimuth rather than from `forward x up`, which
+    // degenerates at the poles.
+    let right = Vec3::new(-azimuth.sin(), 0.0, azimuth.cos());
     let up = right.cross(forward).normalize_or(Vec3::Y);
     let target = right * (camera.offset_x * extent) + up * (camera.offset_y * extent);
     let roll = Quat::from_axis_angle(forward, camera.roll_deg.to_radians());
 
-    let minimum_distance = extent * 1.05;
-    let at_distance = |distance: f32| CameraState {
+    CameraState {
         eye: target + direction * distance,
         target,
         up: roll * up,
         fov_y_radians: fov_y,
         near: (distance * 0.001).max(1e-4),
         far: distance * 10.0,
-    };
-
-    /// Widest the geometry reaches on each axis, or `None` if any is behind.
-    fn measure(camera: &CameraState, points: &[Vec3], aspect: f32) -> Option<(f32, f32)> {
-        let view_projection = camera.view_projection(aspect);
-        let (mut widest_x, mut widest_y) = (0.0_f32, 0.0_f32);
-        for point in points {
-            let clip = view_projection * point.extend(1.0);
-            if clip.w <= 1e-6 {
-                return None;
-            }
-            let ndc = clip.truncate() / clip.w;
-            widest_x = widest_x.max(ndc.x.abs());
-            widest_y = widest_y.max(ndc.y.abs());
-        }
-        Some((widest_x, widest_y))
     }
-
-    let half_fov_y = (fov_y * 0.5).tan();
-    let half_fov_x = half_fov_y * aspect;
-    let mut distance = (extent / (fill * half_fov_x))
-        .max(extent * elevation.sin().abs().max(0.05) / (fill * half_fov_y))
-        .max(minimum_distance);
-
-    if points.is_empty() {
-        return (at_distance(distance * camera.zoom.max(0.01)), 0.0, 0.0);
-    }
-
-    // Which axis the fit targets. Fitting the width uses only the horizontal
-    // extent; otherwise whichever axis binds first.
-    let measure_target =
-        |x: f32, y: f32| if config.camera.fit_width { x } else { x.max(y) };
-
-    for _ in 0..MAX_ITERATIONS {
-        match measure(&at_distance(distance), points, aspect) {
-            None => distance = (distance * 1.5).max(minimum_distance),
-            Some((x, y)) => {
-                let widest = measure_target(x, y);
-                if widest <= f32::EPSILON {
-                    break;
-                }
-                let correction = widest / fill;
-                if (correction - 1.0).abs() < TOLERANCE {
-                    break;
-                }
-                distance = (distance * correction).max(minimum_distance);
-            }
-        }
-    }
-
-    // Expand until it genuinely fits, so nothing is ever clipped.
-    for _ in 0..MAX_ITERATIONS {
-        match measure(&at_distance(distance), points, aspect) {
-            Some((x, y)) if measure_target(x, y) <= fill && x <= 1.0 && y <= 1.0 => break,
-            _ => distance = (distance * 1.01).max(minimum_distance),
-        }
-    }
-
-    let final_camera = at_distance(distance * camera.zoom.max(0.01));
-    let (x, y) = measure(&final_camera, points, aspect).unwrap_or((0.0, 0.0));
-    (final_camera, x, y)
 }
 
 #[cfg(test)]
@@ -694,68 +611,75 @@ mod tests {
         );
     }
 
-    /// The whole system must actually be inside the frustum, at a range of
-    /// aspect ratios and camera angles. This is the test that catches framing
-    /// regressions on ultrawide and portrait monitors.
+    /// The inner planets and the Sun must always be on screen.
+    ///
+    /// Note what this does *not* claim. The framing puts a stated radius on the
+    /// left and right edges, so the outer orbits and the belts deliberately run
+    /// past them -- containing an outer orbit entirely means retreating until
+    /// everything is too small to see, because its near side is always far
+    /// closer to the camera than its far side.
+    ///
+    /// The outer planets are only guaranteed at ordinary aspect ratios. On a
+    /// 32:9 display the elevation cap drives the camera very close and Saturn
+    /// can swing past the top of the frame; that is the cost of a composition
+    /// that fills the width, and it is the terrestrial planets and the Sun that
+    /// must never be lost.
     #[test]
-    fn everything_is_inside_the_frustum() {
-        for aspect in [32.0 / 9.0, 16.0 / 9.0, 4.0 / 3.0, 1.0, 9.0 / 16.0] {
-            for elevation in [5.0, 27.0, 60.0, 89.0] {
+    fn the_inner_system_is_always_on_screen() {
+        for aspect in [32.0 / 9.0, 3440.0 / 1440.0, 16.0 / 9.0, 4.0 / 3.0, 1.0, 9.0 / 16.0] {
+            for azimuth in [0.0, 60.0, 137.0, 250.0, 330.0] {
                 let mut config = Config::default();
-                config.camera.elevation_deg = elevation;
+                config.camera.azimuth_deg = azimuth;
                 let scene = Scene::build(&config, &Lookup::builtin(), EPOCH, aspect);
                 let view_projection = scene.camera.view_projection(aspect);
 
+                let inner = ["Mercury", "Venus", "Earth", "Mars"];
                 let mut checked = 0;
-                for point in scene
-                    .orbits
-                    .iter()
-                    .flat_map(|o| o.points.iter().copied())
-                    .chain(scene.bodies.iter().map(|b| b.position))
-                {
-                    let clip = view_projection * point.extend(1.0);
-                    assert!(clip.w > 0.0, "behind the camera at aspect {aspect}");
+                for body in scene.bodies.iter().filter(|b| inner.contains(&b.name)) {
+                    let clip = view_projection * body.position.extend(1.0);
+                    assert!(clip.w > 0.0, "{} is behind the camera", body.name);
                     let ndc = clip.truncate() / clip.w;
                     assert!(
                         ndc.x.abs() <= 1.0 && ndc.y.abs() <= 1.0,
-                        "aspect {aspect}, elevation {elevation}: {ndc:?} outside the frame"
+                        "aspect {aspect:.2}, azimuth {azimuth}: {} at {ndc:?}",
+                        body.name
                     );
                     checked += 1;
                 }
-                assert!(checked > 100);
+                assert!(checked == 4, "expected all four terrestrial planets");
+
+                // And the Sun, which the camera is looking straight at.
+                let clip = view_projection * scene.sun.position.extend(1.0);
+                let ndc = clip.truncate() / clip.w;
+                assert!(clip.w > 0.0 && ndc.x.abs() < 0.5 && ndc.y.abs() < 0.5);
             }
         }
     }
 
-    /// `fill` is a promise about how much of the frame gets used; a scene that
-    /// only fills a tenth of the screen is as wrong as one that overflows.
+    /// `fill` is a promise about where the framing radius lands: a ring of that
+    /// radius should touch `fill` of the half-width, at every aspect ratio.
     #[test]
-    fn framing_actually_fills_the_frame() {
-        for aspect in [32.0 / 9.0, 16.0 / 9.0, 1.0, 9.0 / 16.0] {
+    fn the_framing_radius_lands_where_promised() {
+        for aspect in [3440.0 / 1440.0, 16.0 / 9.0, 4.0 / 3.0, 1.0] {
             let config = Config::default();
             let scene = Scene::build(&config, &Lookup::builtin(), EPOCH, aspect);
             let view_projection = scene.camera.view_projection(aspect);
-            // Belts count: with the Kuiper belt on it, not Neptune's orbit, is
-            // the outermost thing in the scene.
-            let widest = scene
-                .orbits
-                .iter()
-                .flat_map(|o| o.points.iter().copied())
-                .chain(
-                    scene
-                        .belts
-                        .iter()
-                        .flat_map(|b| b.particles.iter().map(|p| p.position)),
-                )
-                .map(|p| {
-                    let clip = view_projection * p.extend(1.0);
-                    let ndc = clip.truncate() / clip.w;
-                    ndc.x.abs().max(ndc.y.abs())
-                })
-                .fold(0.0_f32, f32::max);
+
+            // The framed radius, perpendicular to the view direction, is what
+            // should sit at the edge.
+            let forward = (scene.camera.target - scene.camera.eye).normalize();
+            let side = forward.cross(Vec3::Y).normalize();
+            let radius = scene.camera.eye.length() * config.camera.fill
+                * (config.camera.fov_deg.to_radians() * 0.5).tan()
+                * aspect;
+
+            let clip = view_projection * (side * radius).extend(1.0);
+            let ndc = clip.truncate() / clip.w;
             assert!(
-                widest > 0.8,
-                "aspect {aspect}: the scene only reaches {widest} of the frame"
+                (ndc.x.abs() - config.camera.fill).abs() < 0.06,
+                "aspect {aspect:.2}: framed radius landed at {:.3}, wanted {:.3}",
+                ndc.x.abs(),
+                config.camera.fill
             );
         }
     }

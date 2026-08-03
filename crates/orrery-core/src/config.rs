@@ -141,6 +141,15 @@ pub struct Camera {
     pub elevation_cycle_deg: f32,
     /// Fraction of the frame the outermost drawn orbit should span.
     pub fill: f32,
+    /// Where through each debris belt the left and right screen edges fall, as
+    /// a fraction of the belt's width.
+    ///
+    /// `0.5` puts them on the middle of the belt, so its outer half runs off
+    /// the sides. That is what stops the Kuiper belt dictating the scale of the
+    /// whole picture and crushing the planets into the centre. It does mean the
+    /// camera sits within the belt rather than outside it -- at 50 degrees,
+    /// just inside its mid-radius.
+    pub frame_belt_fraction: f32,
     /// Fit the scene to the frame's *width* rather than to whichever axis binds
     /// first.
     ///
@@ -163,12 +172,13 @@ impl Default for Camera {
             elevation_deg: 27.0,
             azimuth_deg: 0.0,
             roll_deg: 0.0,
-            fov_deg: 55.0,
+            fov_deg: 50.0,
             zoom: 1.0,
             rotation_period_minutes: 60.0,
             elevation_cycle_days: 0.0,
             elevation_cycle_deg: 40.0,
             fill: 0.94,
+            frame_belt_fraction: 0.5,
             fit_width: true,
             offset_x: 0.0,
             offset_y: 0.0,
@@ -503,6 +513,9 @@ impl Config {
         }
         if !(0.0..=100.0).contains(&self.lighting.sun_intensity) {
             return Err(ConfigError::Range("lighting.sun_intensity", "0.0 to 100.0"));
+        }
+        if !(0.0..=1.0).contains(&self.camera.frame_belt_fraction) {
+            return Err(ConfigError::Range("camera.frame_belt_fraction", "0.0 to 1.0"));
         }
         if !(0.0..=1.0).contains(&self.sky.constellation_min_behind_sun) {
             return Err(ConfigError::Range("sky.constellation_min_behind_sun", "0.0 to 1.0"));
