@@ -21,6 +21,7 @@ use glam::{DVec3, Mat4, Quat, Vec3};
 use crate::bodies::{self, BodyData, Rings};
 use crate::config::Config;
 use crate::ephemeris::{self, Planet};
+use crate::lookup::Lookup;
 use crate::time::JulianDate;
 
 /// Convert an ecliptic-frame vector to the renderer's Y-up frame.
@@ -104,7 +105,10 @@ pub struct Scene {
 impl Scene {
     /// Build the scene for `epoch` under `config`, framed for `aspect`
     /// (width / height).
-    pub fn build(config: &Config, epoch: JulianDate, aspect: f32) -> Self {
+    ///
+    /// `lookup` decides where positions come from: a Horizons almanac when one
+    /// covers this instant, the built-in tables otherwise.
+    pub fn build(config: &Config, lookup: &Lookup, epoch: JulianDate, aspect: f32) -> Self {
         let planets = config.bodies.resolve().unwrap_or_default();
         let orbit_scale = &config.scale.orbit;
         let body_scale = &config.scale.body;
@@ -114,10 +118,10 @@ impl Scene {
         let mut extent: f32 = 0.0;
 
         for (index, planet) in planets.iter().copied().enumerate() {
-            let elements = ephemeris::elements_at(planet, epoch);
+            let elements = lookup.elements(planet, epoch);
             let data = bodies::data(planet);
 
-            let position_au = elements.position();
+            let position_au = lookup.position(planet, epoch);
             let position = ecliptic_to_scene(orbit_scale.apply_to_position(position_au));
             let radius = body_scale.apply(data.radius_km) as f32;
 
@@ -401,7 +405,7 @@ mod tests {
     const EPOCH: JulianDate = JulianDate(2_461_255.5);
 
     fn scene() -> Scene {
-        Scene::build(&Config::default(), EPOCH, 16.0 / 9.0)
+        Scene::build(&Config::default(), &Lookup::builtin(), EPOCH, 16.0 / 9.0)
     }
 
     /// The ecliptic-to-scene map must be a rotation, not a reflection, or every
@@ -515,7 +519,7 @@ mod tests {
             for elevation in [5.0, 27.0, 60.0, 89.0] {
                 let mut config = Config::default();
                 config.camera.elevation_deg = elevation;
-                let scene = Scene::build(&config, EPOCH, aspect);
+                let scene = Scene::build(&config, &Lookup::builtin(), EPOCH, aspect);
                 let view_projection = scene.camera.view_projection(aspect);
 
                 let mut checked = 0;
@@ -545,7 +549,7 @@ mod tests {
     fn framing_actually_fills_the_frame() {
         for aspect in [32.0 / 9.0, 16.0 / 9.0, 1.0, 9.0 / 16.0] {
             let config = Config::default();
-            let scene = Scene::build(&config, EPOCH, aspect);
+            let scene = Scene::build(&config, &Lookup::builtin(), EPOCH, aspect);
             let view_projection = scene.camera.view_projection(aspect);
             let widest = scene
                 .orbits
@@ -567,9 +571,9 @@ mod tests {
     #[test]
     fn zoom_pulls_the_camera_back() {
         let mut config = Config::default();
-        let near = Scene::build(&config, EPOCH, 1.6).camera.eye.length();
+        let near = Scene::build(&config, &Lookup::builtin(), EPOCH, 1.6).camera.eye.length();
         config.camera.zoom = 2.0;
-        let far = Scene::build(&config, EPOCH, 1.6).camera.eye.length();
+        let far = Scene::build(&config, &Lookup::builtin(), EPOCH, 1.6).camera.eye.length();
         assert!(far > near * 1.9, "{far} vs {near}");
     }
 
@@ -579,7 +583,7 @@ mod tests {
         config.orbits.enabled = false;
         config.bodies.moon = false;
         config.bodies.asteroid_belt = false;
-        let scene = Scene::build(&config, EPOCH, 1.6);
+        let scene = Scene::build(&config, &Lookup::builtin(), EPOCH, 1.6);
         assert!(scene.orbits.is_empty());
         assert!(!scene.bodies.iter().any(|b| b.name == "Moon"));
         assert!(scene.asteroid_belt.is_none());
@@ -593,7 +597,7 @@ mod tests {
         let mut config = Config::default();
         config.bodies.show = Vec::new();
         config.bodies.moon = false;
-        let scene = Scene::build(&config, EPOCH, 1.6);
+        let scene = Scene::build(&config, &Lookup::builtin(), EPOCH, 1.6);
         assert!(scene.bodies.is_empty());
         assert!(scene.extent.is_finite() && scene.extent > 0.0);
         assert!(scene.camera.eye.is_finite());
@@ -602,8 +606,8 @@ mod tests {
 
     #[test]
     fn planets_advance_along_their_orbits_over_time() {
-        let now = Scene::build(&Config::default(), EPOCH, 1.6);
-        let later = Scene::build(&Config::default(), JulianDate(EPOCH.0 + 30.0), 1.6);
+        let now = Scene::build(&Config::default(), &Lookup::builtin(), EPOCH, 1.6);
+        let later = Scene::build(&Config::default(), &Lookup::builtin(), JulianDate(EPOCH.0 + 30.0), 1.6);
         let mercury_now = now.bodies.iter().find(|b| b.name == "Mercury").unwrap();
         let mercury_later = later.bodies.iter().find(|b| b.name == "Mercury").unwrap();
         // Mercury's year is 88 days, so 30 days is a large fraction of an orbit.

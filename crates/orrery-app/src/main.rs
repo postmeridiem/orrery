@@ -8,6 +8,7 @@
 //! `plasma/` and the README. That also means the same binary runs as a normal
 //! window for development, and as a desktop-level window on macOS.
 
+mod horizons;
 mod platform;
 mod screenshot;
 
@@ -19,6 +20,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use notify::Watcher;
 use orrery_core::config::Config;
+use orrery_core::lookup::Lookup;
 use orrery_core::scene::Scene;
 use orrery_core::time::JulianDate;
 use orrery_render::Renderer;
@@ -34,6 +36,10 @@ struct Options {
     windowed: bool,
     screenshot: Option<PathBuf>,
     size: (u32, u32),
+    /// Fetch a fresh almanac synchronously, report, and exit.
+    refresh_ephemeris: bool,
+    /// Where `--refresh-ephemeris` writes. Defaults to the user cache path.
+    ephemeris_out: Option<PathBuf>,
 }
 
 fn main() -> Result<()> {
@@ -49,13 +55,19 @@ fn main() -> Result<()> {
         .or_else(default_config_path);
     let config = load_config(config_path.as_deref())?;
 
+    if options.refresh_ephemeris {
+        return refresh_ephemeris_now(options.ephemeris_out.clone());
+    }
+
+    let lookup = load_lookup(&config);
+
     if let Some(path) = &options.screenshot {
-        return screenshot::capture(&config, options.size, path);
+        return screenshot::capture(&config, &lookup, options.size, path);
     }
 
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
-    let mut app = App::new(config, config_path, options);
+    let mut app = App::new(config, config_path, options, lookup);
     event_loop.run_app(&mut app)?;
     Ok(())
 }
@@ -66,6 +78,8 @@ fn parse_arguments() -> Result<Options> {
         windowed: false,
         screenshot: None,
         size: (1920, 1080),
+        refresh_ephemeris: false,
+        ephemeris_out: None,
     };
 
     let mut args = std::env::args().skip(1);
@@ -79,6 +93,14 @@ fn parse_arguments() -> Result<Options> {
                 );
             }
             "--windowed" | "-w" => options.windowed = true,
+            "--refresh-ephemeris" => options.refresh_ephemeris = true,
+            "--ephemeris-out" => {
+                options.ephemeris_out = Some(
+                    args.next()
+                        .context("--ephemeris-out needs a path")?
+                        .into(),
+                );
+            }
             "--screenshot" => {
                 options.screenshot = Some(
                     args.next()
@@ -101,7 +123,9 @@ fn parse_arguments() -> Result<Options> {
                      -c, --config <PATH>     configuration file to use\n  \
                      -w, --windowed          run in a normal resizable window\n      \
                      --screenshot <PATH>     render a single PNG frame and exit\n      \
-                     --size <WxH>            size for --screenshot (default 1920x1080)\n  \
+                     --size <WxH>            size for --screenshot (default 1920x1080)\n      \
+                     --refresh-ephemeris     fetch fresh elements from JPL Horizons and exit\n      \
+                     --ephemeris-out <PATH>  where --refresh-ephemeris writes\n  \
                      -h, --help              show this message\n\n\
                      With no --config, reads $XDG_CONFIG_HOME/orrery/orrery.toml\n\
                      (or ~/.config/orrery/orrery.toml), falling back to built-in defaults."
@@ -144,6 +168,59 @@ fn load_config(path: Option<&std::path::Path>) -> Result<Config> {
     }
 }
 
+
+/// Fetch a fresh almanac synchronously and write it out. This is the path a
+/// cron job or systemd timer would use, and how the bundled almanac is made.
+fn refresh_ephemeris_now(destination: Option<PathBuf>) -> Result<()> {
+    let path = destination
+        .or_else(horizons::cache_path)
+        .context("no writable location for the almanac")?;
+    let now = JulianDate::now();
+    log::info!("fetching osculating elements from JPL Horizons");
+    let almanac = horizons::fetch(now)?;
+    horizons::save(&almanac, &path)?;
+    let epochs = almanac
+        .sets_for(orrery_core::Planet::Earth)
+        .map_or(0, |sets| sets.len());
+    log::info!(
+        "wrote {} ({} bodies, {epochs} epochs each)",
+        path.display(),
+        almanac.bodies.len()
+    );
+    Ok(())
+}
+
+/// An almanac fetched at build time, so a fresh install is accurate straight
+/// away and stays accurate with the network permanently disabled. Once it stops
+/// covering the present it simply stops being used and the built-in tables take
+/// over, which is also what triggers a refresh.
+const BUNDLED_ALMANAC: &str = include_str!("../../../data/almanac.toml");
+
+/// Build the position source, best first: the cached almanac, then the bundled
+/// one, then the built-in tables.
+fn load_lookup(config: &Config) -> Lookup {
+    if !config.ephemeris.online {
+        log::info!("ephemeris look-up disabled by config; using the built-in tables");
+        return Lookup::builtin();
+    }
+
+    let cached = horizons::cache_path().and_then(|path| horizons::load_cached(&path));
+    if let Some(almanac) = cached {
+        return Lookup::with_almanac(almanac);
+    }
+
+    match orrery_core::almanac::Almanac::from_toml(BUNDLED_ALMANAC) {
+        Ok(almanac) => {
+            log::info!("using the bundled almanac until a refresh completes");
+            Lookup::with_almanac(almanac)
+        }
+        Err(error) => {
+            log::warn!("the bundled almanac is unusable: {error}");
+            Lookup::builtin()
+        }
+    }
+}
+
 /// GPU state, which only exists once there is a window to draw into.
 struct Graphics {
     window: Arc<Window>,
@@ -165,10 +242,19 @@ struct App {
     /// Config-file change notifications. Held so the watcher stays alive.
     reload_rx: Option<Receiver<()>>,
     _watcher: Option<notify::RecommendedWatcher>,
+    /// Where positions come from. Swapped in place when a refresh lands.
+    lookup: Lookup,
+    /// Result of the background Horizons fetch, if one is in flight.
+    almanac_rx: Option<Receiver<Option<orrery_core::almanac::Almanac>>>,
 }
 
 impl App {
-    fn new(config: Config, config_path: Option<PathBuf>, options: Options) -> Self {
+    fn new(
+        config: Config,
+        config_path: Option<PathBuf>,
+        options: Options,
+        lookup: Lookup,
+    ) -> Self {
         let epoch = config.time.start_epoch().unwrap_or_else(|_| JulianDate::now());
         let (reload_rx, watcher) = match &config_path {
             Some(path) => match watch_config(path) {
@@ -181,7 +267,7 @@ impl App {
             None => (None, None),
         };
 
-        Self {
+        let mut app = Self {
             config,
             config_path,
             options,
@@ -191,6 +277,67 @@ impl App {
             last_frame: Instant::now(),
             reload_rx,
             _watcher: watcher,
+            lookup,
+            almanac_rx: None,
+        };
+        app.start_refresh_if_due();
+        app
+    }
+
+    /// Kick off a Horizons fetch on a background thread if the almanac is
+    /// missing or stale.
+    ///
+    /// Nothing here can delay a frame: the render loop keeps drawing from
+    /// whatever source it already has, and picks up the result when it lands.
+    fn start_refresh_if_due(&mut self) {
+        if !self.config.ephemeris.online || self.almanac_rx.is_some() {
+            return;
+        }
+        let now = JulianDate::now();
+        if !horizons::needs_refresh(self.lookup.almanac(), now, self.config.ephemeris.refresh_days)
+        {
+            return;
+        }
+
+        let (tx, rx) = channel();
+        self.almanac_rx = Some(rx);
+        std::thread::spawn(move || {
+            let result = match horizons::fetch(now) {
+                Ok(almanac) => {
+                    if let Some(path) = horizons::cache_path()
+                        && let Err(error) = horizons::save(&almanac, &path)
+                    {
+                        log::warn!("could not cache the almanac: {error:#}");
+                    }
+                    Some(almanac)
+                }
+                Err(error) => {
+                    // Offline, blocked, or JPL is down. The built-in tables
+                    // remain perfectly serviceable.
+                    log::warn!("ephemeris refresh failed, keeping current source: {error:#}");
+                    None
+                }
+            };
+            let _ = tx.send(result);
+        });
+        log::info!("refreshing the ephemeris in the background");
+    }
+
+    /// Adopt a completed background fetch, if there is one.
+    fn collect_refresh(&mut self) {
+        let Some(rx) = &self.almanac_rx else { return };
+        match rx.try_recv() {
+            Ok(Some(almanac)) => {
+                log::info!(
+                    "ephemeris refreshed: {} bodies from JPL Horizons",
+                    almanac.bodies.len()
+                );
+                self.lookup.set_almanac(Some(almanac));
+                self.almanac_rx = None;
+            }
+            Ok(None) => self.almanac_rx = None,
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => self.almanac_rx = None,
         }
     }
 
@@ -252,7 +399,7 @@ impl App {
         let mut config = self.config.clone();
         config.camera.azimuth_deg += config.camera.orbit_speed_deg_per_hour * elapsed / 3600.0;
 
-        let scene = Scene::build(&config, epoch, aspect);
+        let scene = Scene::build(&config, &self.lookup, epoch, aspect);
 
         let frame = match graphics.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
@@ -331,6 +478,7 @@ impl ApplicationHandler for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.reload_config_if_changed();
+        self.collect_refresh();
 
         // A wallpaper has no business running at the display's full refresh
         // rate, so redraws are paced to the configured frame budget.

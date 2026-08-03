@@ -22,6 +22,7 @@ pollster.workspace = true
 wgpu.workspace = true
 winit.workspace = true
 png = "0.18"
+ureq = "3"
 
 # macOS has no wallpaper-plugin API, so the window is placed at the desktop
 # level directly. Developed against the AppKit docs but unverified on hardware.

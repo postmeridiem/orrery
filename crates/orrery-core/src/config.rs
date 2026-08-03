@@ -22,6 +22,36 @@ pub struct Config {
     pub orbits: Orbits,
     pub render: Render,
     pub bodies: Bodies,
+    pub ephemeris: Ephemeris,
+}
+
+/// Where positions come from.
+///
+/// The built-in tables are always available and need no network. Looking real
+/// osculating elements up from JPL Horizons once a year and propagating from
+/// the nearest of them takes the worst-case error from 0.11° to well under an
+/// arcsecond -- see [`crate::almanac`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Ephemeris {
+    /// Fetch osculating elements from JPL Horizons.
+    ///
+    /// The request contains only a body number and a list of dates -- no
+    /// identifying information. It happens on a background thread, at most
+    /// once per `refresh_days`, and any failure falls back silently to the
+    /// built-in tables, so the orrery renders identically offline.
+    pub online: bool,
+    /// How old the cached almanac may get before it is refreshed.
+    pub refresh_days: f64,
+}
+
+impl Default for Ephemeris {
+    fn default() -> Self {
+        Self {
+            online: true,
+            refresh_days: 365.0,
+        }
+    }
 }
 
 /// Where the camera sits and how it is framed.
@@ -344,6 +374,9 @@ impl Config {
         }
         if self.orbits.segments < 16 {
             return Err(ConfigError::Range("orbits.segments", "at least 16"));
+        }
+        if !(1.0..=3650.0).contains(&self.ephemeris.refresh_days) {
+            return Err(ConfigError::Range("ephemeris.refresh_days", "1 to 3650"));
         }
         Ok(())
     }

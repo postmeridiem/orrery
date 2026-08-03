@@ -2,18 +2,40 @@
 
 An astronomically accurate, animated solar system for your desktop background.
 
-Real planetary positions from JPL's Keplerian element tables, a fully
-procedural starfield with the Milky Way at its true angle to the ecliptic,
-rendered in HDR with wgpu. No texture assets — the whole thing is one binary.
+Real planetary positions from JPL Horizons, refreshed once a year and accurate
+to a tenth of an arcsecond. A fully procedural starfield with the Milky Way at
+its true angle to the ecliptic, rendered in HDR with wgpu. No texture assets —
+the whole thing is one binary.
 
 ![the default view](docs/preview.png)
 
 ## What "accurate" means here
 
-Positions come from the JPL Solar System Dynamics [Approximate Positions of the
-Major Planets](https://ssd.jpl.nasa.gov/planets/approx_pos.html) tables. The
-tests check them against state vectors pulled from the JPL Horizons API at
-three epochs spanning 1990–2044. Worst-case error in heliocentric direction:
+Positions come from **JPL Horizons**, looked up once a year.
+
+The orrery asks Horizons for each planet's real *osculating* orbit — the orbit
+it is instantaneously on — at monthly epochs covering the year ahead, then
+propagates from whichever epoch is nearest. Because the propagation interval is
+then a couple of weeks rather than decades, the perturbations planets exert on
+each other barely have time to accumulate. One request per body covers a whole
+year, since Horizons returns every epoch in a single response.
+
+Measured against Horizons state vectors at four dates across the bundled
+almanac's coverage (`crates/orrery-core/tests/almanac_accuracy.rs` — both the
+almanac and the reference vectors are real data, not synthetic):
+
+| Source | Worst-case direction error |
+|---|---|
+| Annual Horizons look-up | **0.079 arcsec** (2.2e-5°) |
+| Built-in tables, same dates | 0.074° — Saturn |
+
+That is a factor of ~3,300 overall, and ~14,000 for Saturn specifically.
+
+If the network is unavailable, blocked, or switched off, everything still
+works. The fallback is the JPL Solar System Dynamics [Approximate Positions of
+the Major Planets](https://ssd.jpl.nasa.gov/planets/approx_pos.html) tables,
+compiled into the binary and checked against Horizons at three epochs spanning
+1990–2044:
 
 | Body | Error | | Body | Error |
 |---|---|---|---|---|
@@ -24,8 +46,28 @@ three epochs spanning 1990–2044. Worst-case error in heliocentric direction:
 | Neptune | 0.0092° | | | |
 
 Saturn is the worst case because the Jupiter–Saturn "great inequality" produces
-periodic perturbations that linear element rates cannot represent. Even so,
-0.1° is a fifth of the Moon's apparent diameter — far finer than a pixel.
+periodic perturbations that mean elements with linear rates cannot represent —
+which is exactly what the annual look-up fixes. Even the fallback is a fifth of
+the Moon's apparent diameter, far finer than a pixel.
+
+### How the look-up behaves
+
+- It runs **on a background thread** and can never delay a frame.
+- The request carries a body number and a list of dates. Nothing identifying.
+- Every failure path — offline, firewalled, JPL down, corrupt cache, truncated
+  download — falls back silently to the built-in tables.
+- The result is cached in `~/.local/share/orrery/almanac.toml` and refreshed
+  when it is older than `refresh_days` **or** when its epochs no longer bracket
+  the present, so a clock jump triggers a refresh too.
+- A **bundled almanac** ships with the binary, so a fresh install is
+  arcsecond-accurate immediately, even with the network permanently disabled.
+- `online = false` disables it entirely.
+
+Refresh manually, or from a cron job or systemd timer:
+
+```sh
+orrery --refresh-ephemeris
+```
 
 Two things are deliberately *not* to scale, because they cannot be:
 
@@ -134,6 +176,10 @@ exponent = 0.45        # lower compresses the outer system harder
 [render]
 fps = 30               # a wallpaper needs no more
 resolution_scale = 1.0 # drop to 0.75 on a modest GPU at 4K
+
+[ephemeris]
+online = true          # annual JPL Horizons look-up; false never touches the network
+refresh_days = 365.0
 ```
 
 Note that `days_per_second = 0` is real time and therefore the only setting
@@ -148,18 +194,25 @@ console to complain to. Run `orrery --windowed` to see the error.
 
 | Crate | What |
 |---|---|
-| `orrery-core` | Ephemeris, physical data, scale laws, config, scene layout. No GPU, no platform code — so the astronomy is testable on its own. |
+| `orrery-core` | Ephemeris, almanac, physical data, scale laws, config, scene layout. No GPU, no platform code — so the astronomy is testable on its own. |
 | `orrery-render` | wgpu renderer and WGSL shaders. |
-| `orrery-app` | Window, event loop, config hot-reload, platform placement. |
+| `orrery-app` | Window, event loop, config hot-reload, Horizons client, platform placement. |
 | `plasma/` | The Plasma 6 wallpaper KPackage. |
+| `data/` | The bundled almanac, generated by `--refresh-ephemeris`. |
 
 ```sh
-cargo test                                   # 51 tests, mostly astronomy
+cargo test                                   # 77 tests, mostly astronomy
 orrery --screenshot out.png --size 3840x2160 # headless single frame
 ```
 
 `--screenshot` renders with no window or surface at all, which is how the look
 gets checked without a display attached.
+
+The one test that touches the network is opt-in:
+
+```sh
+cargo test -p orrery-app -- --ignored live_horizons
+```
 
 ## Notes for the curious
 

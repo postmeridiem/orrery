@@ -110,6 +110,23 @@ bloom_radius = 0.06
 vsync = true
 resolution_scale = 1.0
 
+[ephemeris]
+# Where positions come from.
+#
+# With this on, the orrery asks JPL Horizons once a year for the real
+# osculating orbit of each planet at monthly epochs, and propagates from
+# whichever epoch is nearest. That takes worst-case error from 0.074 degrees
+# (Saturn, where the Jupiter-Saturn great inequality defeats the built-in
+# linear element rates) down to about 0.08 arcseconds.
+#
+# The request carries a body number and a list of dates and nothing else. It
+# runs on a background thread and never delays a frame, and every failure --
+# offline, blocked, JPL down -- falls back silently to the built-in tables.
+# Set online = false to never touch the network; the orrery still renders the
+# correct sky, just to 0.11 degrees instead.
+online = true
+refresh_days = 365.0
+
 [bodies]
 # Case-insensitive. Pluto is off by default: it is not a planet, and its 17
 # degree inclination sits it awkwardly outside the plane of the others.

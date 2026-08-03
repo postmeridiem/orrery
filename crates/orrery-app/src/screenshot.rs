@@ -8,6 +8,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use orrery_core::config::Config;
+use orrery_core::lookup::Lookup;
 use orrery_core::scene::Scene;
 use orrery_core::time::JulianDate;
 use orrery_render::Renderer;
@@ -16,7 +17,12 @@ use orrery_render::Renderer;
 /// boundary, so the readback buffer is usually wider than the image.
 const COPY_ALIGNMENT: u32 = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
 
-pub fn capture(config: &Config, size: (u32, u32), path: &Path) -> Result<()> {
+pub fn capture(
+    config: &Config,
+    lookup: &Lookup,
+    size: (u32, u32),
+    path: &Path,
+) -> Result<()> {
     let (width, height) = (size.0.max(1), size.1.max(1));
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
 
@@ -61,7 +67,7 @@ pub fn capture(config: &Config, size: (u32, u32), path: &Path) -> Result<()> {
         .time
         .start_epoch()
         .unwrap_or_else(|_| JulianDate::now());
-    let scene = Scene::build(config, epoch, width as f32 / height as f32);
+    let scene = Scene::build(config, lookup, epoch, width as f32 / height as f32);
     renderer.render(&device, &queue, &view, &scene, config, 0.0);
 
     let unpadded_bytes_per_row = width * 4;
