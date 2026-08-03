@@ -161,14 +161,18 @@ pub struct CameraState {
 
 impl CameraState {
     pub fn view(&self) -> Mat4 {
-        Mat4::look_at_rh(self.eye, self.target, self.up)
+        glam::camera::rh::view::look_at_mat4(self.eye, self.target, self.up)
     }
 
     /// Reversed-Z infinite perspective. Reversed Z buys float depth precision
     /// across the enormous near/far ratio an orrery spans; the renderer pairs
     /// it with a `GreaterEqual` depth test and a clear value of 0.
     pub fn projection(&self, aspect: f32) -> Mat4 {
-        Mat4::perspective_infinite_reverse_rh(self.fov_y_radians, aspect, self.near)
+        glam::camera::rh::proj::directx::perspective_infinite_reverse(
+            self.fov_y_radians,
+            aspect,
+            self.near,
+        )
     }
 
     pub fn view_projection(&self, aspect: f32) -> Mat4 {

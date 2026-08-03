@@ -157,12 +157,15 @@ fn deep_sky_appearance(kind: DeepSkyKind) -> (f32, [f32; 3]) {
 }
 
 /// Buffers and counts for everything drawn on the celestial sphere.
+///
+/// The buffers are never read back; they are held so their lifetime is
+/// obviously tied to the bind group that references them.
 struct Celestial {
-    stars: wgpu::Buffer,
+    _stars: wgpu::Buffer,
     star_count: u32,
-    segments: wgpu::Buffer,
+    _segments: wgpu::Buffer,
     segment_count: u32,
-    deep_sky: wgpu::Buffer,
+    _deep_sky: wgpu::Buffer,
     deep_sky_count: u32,
     bind_group: wgpu::BindGroup,
 }
@@ -955,11 +958,11 @@ impl Renderer {
         });
 
         self.celestial = Some(Celestial {
-            stars: star_buffer,
+            _stars: star_buffer,
             star_count: stars.len() as u32,
-            segments: segment_buffer,
+            _segments: segment_buffer,
             segment_count: segments.len() as u32,
-            deep_sky: deep_sky_buffer,
+            _deep_sky: deep_sky_buffer,
             deep_sky_count: deep_sky.len() as u32,
             bind_group,
         });

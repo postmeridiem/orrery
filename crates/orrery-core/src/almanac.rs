@@ -206,7 +206,7 @@ pub fn parse_horizons_elements(text: &str) -> Result<Vec<Osculating>, AlmanacErr
 
     // Records are delimited by the epoch line, so a record is complete when the
     // next epoch line arrives or the block ends.
-    let mut flush = |epoch: &mut Option<f64>,
+    let flush = |epoch: &mut Option<f64>,
                      fields: &mut BTreeMap<&str, f64>,
                      sets: &mut Vec<Osculating>|
      -> Result<(), AlmanacError> {
