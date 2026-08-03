@@ -452,25 +452,30 @@ fn frame_camera(config: &Config, points: &[Vec3], extent: f32, aspect: f32) -> C
     // `fill * aspect * sin(e)` of the half-height. On a 21:9 monitor that
     // exceeds the frame for any elevation above about 25 degrees, so the tilt
     // has to come down with the aspect ratio rather than stay fixed.
-    const VERTICAL_LIMIT: f32 = 0.97;
-    let mut elevation = camera.elevation_deg;
-    let mut best = solve_at_elevation(config, points, extent, aspect, elevation, fill);
+    // Cap the elevation from the aspect ratio alone, not from the geometry.
+    //
+    // Seen from elevation e, a ring spanning the full width projects to about
+    // `fill * aspect * sin(e)` of the half-height, so the steepest elevation
+    // that still fits is `asin(1 / (fill * aspect))`.
+    //
+    // This used to be solved per frame by searching for the largest elevation
+    // that fitted the actual point cloud. That search is not stable: lowering
+    // the elevation flattens the disc, which lets the camera move closer to
+    // fill the width, which magnifies the vertical extent again. The predicate
+    // is not monotonic, so as the camera circled the Sun the answer flipped
+    // between values and the whole view visibly snapped between angles.
+    //
+    // A closed form has no such problem. It is approximate -- it ignores
+    // perspective foreshortening -- but the distance solve below still measures
+    // the real geometry and expands until nothing clips, so the approximation
+    // costs a little unused width rather than a cropped scene. And because it
+    // depends only on the aspect ratio, it is constant for a given screen.
+    let steepest = (1.0 / (fill * aspect)).clamp(-1.0, 1.0).asin().to_degrees();
+    let elevation = camera.elevation_deg.min(steepest);
 
-    for _ in 0..48 {
-        if best.2 <= VERTICAL_LIMIT {
-            break;
-        }
-        // Shrink toward the plane. sin(e) is what scales the projected height,
-        // so scaling the elevation itself converges quickly and monotonically.
-        elevation *= 0.94;
-        if elevation < 1.0 {
-            break;
-        }
-        best = solve_at_elevation(config, points, extent, aspect, elevation, fill);
-    }
-
-    best.0
+    solve_at_elevation(config, points, extent, aspect, elevation, fill).0
 }
+
 
 /// Place the camera at a given elevation and solve its distance.
 ///
