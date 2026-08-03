@@ -213,6 +213,23 @@ pub struct Sky {
     pub ambient: f32,
     /// Degrees to rotate the generated sky about the ecliptic pole.
     pub rotation_deg: f32,
+
+    /// Draw the real catalogued stars at their true positions.
+    ///
+    /// With this off the sky is entirely procedural: still pretty, but the
+    /// constellations are not there to be found.
+    pub real_stars: bool,
+    /// Faintest catalogued star to draw. The catalogue runs to 6.5, which is
+    /// roughly the naked-eye limit under a dark sky.
+    pub magnitude_limit: f32,
+    /// Draw constellation figures.
+    pub constellations: bool,
+    /// How strongly to draw them. Deliberately very low by default: the lines
+    /// are meant to be found by someone looking for them, not to be a diagram.
+    pub constellation_opacity: f32,
+    /// Draw the curated deep-sky objects.
+    pub deep_sky: bool,
+    pub deep_sky_opacity: f32,
 }
 
 impl Default for Sky {
@@ -221,10 +238,16 @@ impl Default for Sky {
             seed: 0x0B17_5EED,
             star_density: 1.0,
             star_brightness: 1.0,
-            milky_way: 0.85,
-            nebula: 0.55,
-            ambient: 0.015,
+            milky_way: 0.80,
+            nebula: 0.35,
+            ambient: 0.030,
             rotation_deg: 0.0,
+            real_stars: true,
+            magnitude_limit: 6.5,
+            constellations: true,
+            constellation_opacity: 0.10,
+            deep_sky: true,
+            deep_sky_opacity: 0.55,
         }
     }
 }
@@ -374,6 +397,9 @@ impl Config {
         }
         if self.orbits.segments < 16 {
             return Err(ConfigError::Range("orbits.segments", "at least 16"));
+        }
+        if !(-2.0..=6.5).contains(&self.sky.magnitude_limit) {
+            return Err(ConfigError::Range("sky.magnitude_limit", "-2.0 to 6.5"));
         }
         if !(1.0..=3650.0).contains(&self.ephemeris.refresh_days) {
             return Err(ConfigError::Range("ephemeris.refresh_days", "1 to 3650"));

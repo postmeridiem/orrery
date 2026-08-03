@@ -90,14 +90,16 @@ fn milky_way(dir: vec3<f32>, seed: f32) -> vec3<f32> {
     var band = exp(-pow(latitude / width, 2.0));
 
     // Clumpy star clouds along the band.
-    let clouds = fbm(dir * 5.0 + seed, 5);
-    band = band * (0.45 + 0.95 * clouds) * (0.55 + 0.9 * bulge);
+    // Higher frequency and lower contrast than a standalone band would want:
+    // at close zoom the old low-frequency version read as cumulus cloud.
+    let clouds = fbm(dir * 16.0 + seed, 5);
+    band = band * (0.72 + 0.48 * clouds) * (0.55 + 0.9 * bulge);
 
     // Dark dust lanes cutting through the plane. Ridged noise gives them the
     // filamentary look the real thing has.
-    let dust = ridged(dir * 9.0 + seed * 1.7, 4);
-    let lane = smoothstep(0.42, 0.88, dust) * exp(-pow(latitude / (width * 0.75), 2.0));
-    band = max(band - lane * 0.85, 0.0);
+    let dust = ridged(dir * 22.0 + seed * 1.7, 4);
+    let lane = smoothstep(0.45, 0.90, dust) * exp(-pow(latitude / (width * 0.75), 2.0));
+    band = max(band - lane * 0.55, 0.0);
 
     // Slightly warm in the bulge, cooler out along the arms.
     let colour = mix(vec3<f32>(0.62, 0.68, 0.92), vec3<f32>(1.0, 0.90, 0.72), bulge * 0.8);
@@ -148,9 +150,9 @@ fn fragment_main(in: SkyVertex) -> @location(0) vec4<f32> {
     // stars/sr on screen in total -- a few thousand across a typical viewport.
     // Left uncalibrated, the fine layers alone put a star on every pixel.
     let core_radius = globals.sky_c.x * globals.sky_c.y;
-    var stars = star_layer(dir, 220.0, seed, 0.0110 * density, core_radius) * 1.00;
-    stars = stars + star_layer(dir, 480.0, seed + 13u, 0.0021 * density, core_radius) * 0.70;
-    stars = stars + star_layer(dir, 950.0, seed + 71u, 0.00045 * density, core_radius) * 0.45;
+    var stars = star_layer(dir, 320.0, seed, 0.0045 * density, core_radius) * 0.55;
+    stars = stars + star_layer(dir, 700.0, seed + 13u, 0.0011 * density, core_radius) * 0.38;
+    stars = stars + star_layer(dir, 1300.0, seed + 71u, 0.00030 * density, core_radius) * 0.24;
 
     // The galactic band carries its own haze of stars too faint to resolve.
     // Confined tightly to the band, or it just raises the count everywhere.
@@ -159,8 +161,8 @@ fn fragment_main(in: SkyVertex) -> @location(0) vec4<f32> {
         * smoothstep(0.06, 0.45, length(band));
 
     var colour = (stars + haze) * brightness * 1.7;
-    colour = colour + band * globals.sky_a.z * 0.30;
-    colour = colour + nebulosity(dir, noise_seed) * globals.sky_a.w * 0.22;
+    colour = colour + band * globals.sky_a.z * 0.11;
+    colour = colour + nebulosity(dir, noise_seed) * globals.sky_a.w * 0.05;
     colour = colour + vec3<f32>(0.010, 0.013, 0.026) * globals.sky_b.x * 4.0;
 
     return vec4<f32>(colour, 1.0);

@@ -1,0 +1,43 @@
+# Deep-sky objects, deliberately curated rather than exhaustive: these are the
+# ones worth recognising, and a fuller catalogue would only be clutter.
+#
+# ra/dec are J2000 degrees, resolved from SIMBAD. Nothing positional here is
+# from memory. radius is degrees, from SIMBAD's galdim major axis halved --
+# except for the three large diffuse nebulae marked below, which SIMBAD carries
+# no dimension for and where the drawn extent is a judgement anyway, since a
+# diffuse nebula has no edge.
+#
+# `prominence` is likewise curated: a 0..1 weighting of how strongly to draw the
+# object, NOT a measured magnitude. Integrated magnitude is a poor predictor of
+# how striking an extended object looks -- M31 is brighter than M42 on paper and
+# far less arresting in a photograph. SIMBAD's V for planetary nebulae is worse
+# still: it reports the central *star* (M57 at 15.8), not the nebula.
+#
+# Curated visual extent, not a catalogue dimension: Carina Nebula, Lagoon
+# Nebula, North America Nebula.
+#
+# Regenerate positions with tools/fetch-catalog.sh
+name,ra,dec,radius,kind,prominence
+Orion Nebula,83.8201,-5.3876,0.550,emission_nebula,1.00
+Andromeda Galaxy,10.6847,41.2688,1.663,galaxy,0.95
+Pleiades,56.6008,24.1139,0.641,open_cluster,0.90
+Large Magellanic Cloud,80.8942,-69.7561,2.690,galaxy,0.85
+Carina Nebula,161.2593,-59.6999,1.000,emission_nebula,0.85
+Omega Centauri,201.6970,-47.4795,0.303,globular_cluster,0.80
+Lagoon Nebula,270.9042,-24.3867,0.750,emission_nebula,0.75
+Small Magellanic Cloud,13.1583,-72.8003,1.318,galaxy,0.70
+Hercules Cluster,250.4235,36.4613,0.275,globular_cluster,0.70
+North America Nebula,314.6958,44.3300,1.000,emission_nebula,0.60
+Beehive Cluster,130.0542,19.6211,0.985,open_cluster,0.60
+Eagle Nebula,274.6880,-13.7920,0.667,emission_nebula,0.55
+Trifid Nebula,270.6750,-22.9717,0.233,emission_nebula,0.55
+Ptolemy Cluster,268.4471,-34.8411,0.834,open_cluster,0.55
+Sagittarius Cluster,279.0998,-23.9048,0.200,globular_cluster,0.55
+Triangulum Galaxy,23.4621,30.6602,0.502,galaxy,0.50
+Whirlpool Galaxy,202.4696,47.1953,0.075,galaxy,0.50
+Double Cluster,34.7408,57.1339,0.136,open_cluster,0.50
+Dumbbell Nebula,299.9015,22.7212,0.056,planetary_nebula,0.45
+Bode's Galaxy,148.8882,69.0653,0.178,galaxy,0.45
+Crab Nebula,83.6324,22.0174,0.058,supernova_remnant,0.40
+Ring Nebula,283.3962,33.0291,0.010,planetary_nebula,0.40
+Sombrero Galaxy,189.9976,-11.6231,0.071,galaxy,0.40

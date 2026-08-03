@@ -21,6 +21,7 @@ use glam::{Mat4, Vec3};
 use orrery_core::bodies::Rings;
 use orrery_core::config::Config;
 use orrery_core::scene::{BodyInstance, Scene};
+use orrery_core::sky::{Catalog, DeepSkyKind};
 use wgpu::util::DeviceExt;
 
 pub mod geometry;
@@ -112,6 +113,61 @@ impl GpuOrbitVertex {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
+struct GpuStar {
+    /// xyz = unit direction, w = visual magnitude.
+    direction_magnitude: [f32; 4],
+    colour: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+struct GpuSegment {
+    endpoint_a: [f32; 4],
+    endpoint_b: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+struct GpuDeepSky {
+    /// xyz = unit direction, w = angular radius in radians.
+    direction_radius: [f32; 4],
+    /// rgb = tint, a = prominence.
+    colour: [f32; 4],
+    /// kind, then padding.
+    params: [f32; 4],
+}
+
+/// Tint and kind index for each class of deep-sky object. Must match the
+/// `KIND_*` constants in `celestial.wgsl`.
+fn deep_sky_appearance(kind: DeepSkyKind) -> (f32, [f32; 3]) {
+    match kind {
+        // Hydrogen-alpha red, shading pink where it is brightest.
+        DeepSkyKind::EmissionNebula => (0.0, [0.90, 0.34, 0.38]),
+        // Doubly-ionised oxygen.
+        DeepSkyKind::PlanetaryNebula => (1.0, [0.36, 0.82, 0.74]),
+        // Old, metal-poor, and distinctly yellow.
+        DeepSkyKind::GlobularCluster => (2.0, [1.00, 0.88, 0.66]),
+        // Young hot stars.
+        DeepSkyKind::OpenCluster => (3.0, [0.72, 0.82, 1.00]),
+        // Integrated starlight, faintly warm.
+        DeepSkyKind::Galaxy => (4.0, [0.92, 0.88, 0.80]),
+        DeepSkyKind::SupernovaRemnant => (5.0, [0.70, 0.62, 0.92]),
+    }
+}
+
+/// Buffers and counts for everything drawn on the celestial sphere.
+struct Celestial {
+    stars: wgpu::Buffer,
+    star_count: u32,
+    segments: wgpu::Buffer,
+    segment_count: u32,
+    deep_sky: wgpu::Buffer,
+    deep_sky_count: u32,
+    bind_group: wgpu::BindGroup,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
 struct GpuTonemapSettings {
     /// exposure, bloom intensity, unused, unused.
     values: [f32; 4],
@@ -178,6 +234,9 @@ pub struct Renderer {
     ring: GpuMesh,
 
     sky_pipeline: wgpu::RenderPipeline,
+    star_pipeline: wgpu::RenderPipeline,
+    constellation_pipeline: wgpu::RenderPipeline,
+    deep_sky_pipeline: wgpu::RenderPipeline,
     body_pipeline: wgpu::RenderPipeline,
     ring_pipeline: wgpu::RenderPipeline,
     orbit_pipeline: wgpu::RenderPipeline,
@@ -191,6 +250,8 @@ pub struct Renderer {
 
     sample_count: u32,
     targets: Targets,
+    celestial: Option<Celestial>,
+    celestial_layout: wgpu::BindGroupLayout,
 }
 
 impl Renderer {
@@ -219,6 +280,8 @@ impl Renderer {
         let sky_shader = make_shader("sky", include_str!("../shaders/sky.wgsl"), true);
         let body_shader = make_shader("body", include_str!("../shaders/body.wgsl"), true);
         let orbit_shader = make_shader("orbit", include_str!("../shaders/orbit.wgsl"), true);
+        let celestial_shader =
+            make_shader("celestial", include_str!("../shaders/celestial.wgsl"), true);
         let bloom_shader = make_shader("bloom", include_str!("../shaders/bloom.wgsl"), false);
         let tonemap_shader = make_shader("tonemap", include_str!("../shaders/tonemap.wgsl"), false);
 
@@ -249,6 +312,22 @@ impl Renderer {
                 },
                 count: None,
             }],
+        });
+
+        // Three read-only storage buffers: stars, constellation segments, and
+        // deep-sky objects.
+        let celestial_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("celestial"),
+            entries: &std::array::from_fn::<_, 3, _>(|index| wgpu::BindGroupLayoutEntry {
+                binding: index as u32,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }),
         });
 
         let blit_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -520,6 +599,70 @@ impl Renderer {
             cache: None,
         });
 
+        let celestial_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("celestial"),
+                bind_group_layouts: &[Some(&globals_layout), Some(&celestial_layout)],
+                immediate_size: 0,
+            });
+
+        // Everything on the celestial sphere is additive: stars and nebulosity
+        // emit light, they do not occlude one another.
+        let celestial_pipeline = |label: &str, vertex: &str, fragment: &str| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&celestial_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &celestial_shader,
+                    entry_point: Some(vertex),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleStrip,
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                // Behind everything, and occluding nothing.
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(wgpu::CompareFunction::Always),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample,
+                fragment: Some(wgpu::FragmentState {
+                    module: &celestial_shader,
+                    entry_point: Some(fragment),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: HDR_FORMAT,
+                        blend: Some(wgpu::BlendState {
+                            color: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::One,
+                                dst_factor: wgpu::BlendFactor::One,
+                                operation: wgpu::BlendOperation::Add,
+                            },
+                            alpha: wgpu::BlendComponent::REPLACE,
+                        }),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+
+        let star_pipeline = celestial_pipeline("stars", "star_vertex", "star_fragment");
+        let constellation_pipeline = celestial_pipeline(
+            "constellations",
+            "constellation_vertex",
+            "constellation_fragment",
+        );
+        let deep_sky_pipeline =
+            celestial_pipeline("deep sky", "deep_sky_vertex", "deep_sky_fragment");
+
         let blit_pipeline = |label: &str, entry: &str, blend: Option<wgpu::BlendState>| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
@@ -610,6 +753,9 @@ impl Renderer {
             sphere,
             ring,
             sky_pipeline,
+            star_pipeline,
+            constellation_pipeline,
+            deep_sky_pipeline,
             body_pipeline,
             ring_pipeline,
             orbit_pipeline,
@@ -621,7 +767,116 @@ impl Renderer {
             sampler,
             sample_count,
             targets,
+            celestial: None,
+            celestial_layout,
         }
+    }
+
+    /// Upload the star catalogue, constellation figures and deep-sky objects.
+    ///
+    /// Done once: this data is fixed, so the buffers are built at start-up and
+    /// only the magnitude cut-off is applied here.
+    pub fn set_catalog(&mut self, device: &wgpu::Device, catalog: &Catalog, config: &Config) {
+        let stars: Vec<GpuStar> = catalog
+            .stars_to_magnitude(config.sky.magnitude_limit)
+            .map(|star| GpuStar {
+                direction_magnitude: [
+                    star.direction.x,
+                    star.direction.y,
+                    star.direction.z,
+                    star.magnitude,
+                ],
+                colour: [star.color[0], star.color[1], star.color[2], 1.0],
+            })
+            .collect();
+
+        let segments: Vec<GpuSegment> = catalog
+            .constellations
+            .iter()
+            .flat_map(|figure| figure.segments.iter())
+            .map(|(a, b)| GpuSegment {
+                endpoint_a: [a.x, a.y, a.z, 0.0],
+                endpoint_b: [b.x, b.y, b.z, 0.0],
+            })
+            .collect();
+
+        let deep_sky: Vec<GpuDeepSky> = catalog
+            .deep_sky
+            .iter()
+            .map(|object| {
+                let (kind, colour) = deep_sky_appearance(object.kind);
+                GpuDeepSky {
+                    direction_radius: [
+                        object.direction.x,
+                        object.direction.y,
+                        object.direction.z,
+                        object.angular_radius_deg.to_radians(),
+                    ],
+                    colour: [colour[0], colour[1], colour[2], object.prominence],
+                    params: [kind, 0.0, 0.0, 0.0],
+                }
+            })
+            .collect();
+
+        log::info!(
+            "sky: {} stars to magnitude {}, {} constellation segments, {} deep-sky objects",
+            stars.len(),
+            config.sky.magnitude_limit,
+            segments.len(),
+            deep_sky.len()
+        );
+
+        // A zero-length storage buffer is invalid, so empty sets still get one
+        // element; the draw count is what actually suppresses them.
+        let upload = |label: &str, bytes: &[u8], stride: usize| {
+            let fallback = vec![0u8; stride];
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(label),
+                contents: if bytes.is_empty() { &fallback } else { bytes },
+                usage: wgpu::BufferUsages::STORAGE,
+            })
+        };
+
+        let star_buffer = upload("stars", bytemuck::cast_slice(&stars), size_of::<GpuStar>());
+        let segment_buffer = upload(
+            "constellation segments",
+            bytemuck::cast_slice(&segments),
+            size_of::<GpuSegment>(),
+        );
+        let deep_sky_buffer = upload(
+            "deep sky",
+            bytemuck::cast_slice(&deep_sky),
+            size_of::<GpuDeepSky>(),
+        );
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("celestial"),
+            layout: &self.celestial_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: star_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: segment_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: deep_sky_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        self.celestial = Some(Celestial {
+            stars: star_buffer,
+            star_count: stars.len() as u32,
+            segments: segment_buffer,
+            segment_count: segments.len() as u32,
+            deep_sky: deep_sky_buffer,
+            deep_sky_count: deep_sky.len() as u32,
+            bind_group,
+        });
     }
 
     pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
@@ -680,7 +935,14 @@ impl Renderer {
         let mut encoder =
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
 
-        self.scene_pass(&mut encoder, sphere_instances, ring_instances);
+        self.scene_pass(
+            &mut encoder,
+            sphere_instances,
+            ring_instances,
+            config.sky.real_stars,
+            config.sky.constellations,
+            config.sky.deep_sky,
+        );
         self.bloom_pass(&mut encoder);
         self.tonemap_pass(&mut encoder, output);
 
@@ -737,8 +999,8 @@ impl Renderer {
                 // rather than in units of whatever lattice generated them.
                 scene.camera.fov_y_radians / self.targets.height.max(1) as f32,
                 STAR_CORE_RADIUS_PIXELS,
-                0.0,
-                0.0,
+                config.sky.constellation_opacity,
+                config.sky.deep_sky_opacity,
             ],
         };
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
@@ -836,11 +1098,15 @@ impl Renderer {
         queue.write_buffer(&self.orbit_vertices, 0, bytemuck::cast_slice(&vertices));
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn scene_pass(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         sphere_instances: std::ops::Range<u32>,
         ring_instances: std::ops::Range<u32>,
+        draw_stars: bool,
+        draw_constellations: bool,
+        draw_deep_sky: bool,
     ) {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("scene"),
@@ -872,6 +1138,24 @@ impl Renderer {
 
         pass.set_pipeline(&self.sky_pipeline);
         pass.draw(0..3, 0..1);
+
+        // Real sky on top of the procedural haze, still behind the planets.
+        if let Some(celestial) = &self.celestial {
+            pass.set_bind_group(1, &celestial.bind_group, &[]);
+            if celestial.deep_sky_count > 0 && draw_deep_sky {
+                pass.set_pipeline(&self.deep_sky_pipeline);
+                pass.draw(0..4, 0..celestial.deep_sky_count);
+            }
+            if celestial.segment_count > 0 && draw_constellations {
+                pass.set_pipeline(&self.constellation_pipeline);
+                pass.draw(0..4, 0..celestial.segment_count);
+            }
+            // Stars last, so they sit over the nebulosity they are embedded in.
+            if celestial.star_count > 0 && draw_stars {
+                pass.set_pipeline(&self.star_pipeline);
+                pass.draw(0..4, 0..celestial.star_count);
+            }
+        }
 
         pass.set_bind_group(1, &self.instances_bind_group, &[]);
         pass.set_pipeline(&self.body_pipeline);

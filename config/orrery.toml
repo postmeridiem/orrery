@@ -82,12 +82,31 @@ star_density = 1.0
 star_brightness = 1.0
 # The galactic band is placed using the real IAU galactic pole, so it crosses
 # the solar system at its true angle of roughly 60 degrees to the ecliptic.
-milky_way = 0.85
-nebula = 0.55
+milky_way = 0.80
+nebula = 0.35
 # Lifts the darkest sky off pure black, and faintly lights the night side of
-# each planet.
-ambient = 0.015
+# each planet. Planets between you and the Sun genuinely do show their night
+# side, so this is what keeps them from being flat black discs.
+ambient = 0.030
 rotation_deg = 0.0
+
+# The real sky. 8,404 catalogued stars to magnitude 6.5 -- the whole naked-eye
+# sky -- at their true positions, with real magnitudes and colours from their
+# B-V index. See data/SOURCES.md for provenance and licensing.
+real_stars = true
+magnitude_limit = 6.5
+
+# Constellation figures for the 20 major constellations. Deliberately drawn
+# very faint: they are meant to be found by someone looking for them, not to
+# turn the wallpaper into a star chart. Raise toward 0.5 to actually study them.
+constellations = true
+constellation_opacity = 0.10
+
+# 23 curated deep-sky objects at their true positions -- Orion, Andromeda, the
+# Pleiades, the Magellanic Clouds and so on. Curated rather than exhaustive,
+# because a full catalogue would only be clutter.
+deep_sky = true
+deep_sky_opacity = 0.55
 
 [orbits]
 enabled = true

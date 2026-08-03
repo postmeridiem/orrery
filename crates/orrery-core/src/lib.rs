@@ -11,6 +11,7 @@ pub mod ephemeris;
 pub mod lookup;
 pub mod scale;
 pub mod scene;
+pub mod sky;
 pub mod time;
 
 pub use ephemeris::Planet;

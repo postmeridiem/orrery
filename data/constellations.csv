@@ -1,0 +1,138 @@
+# Constellation figures: which stars to join with a line.
+#
+# The IAU standardises constellation *boundaries* but not the stick
+# figures, so every published set is someone's artistic choice and
+# carries their licence -- Stellarium's are GPL/CC BY-SA, and its
+# permissive-sounding 'modern_iau' set is a byte-identical copy of the
+# Sky & Telescope one. None are compatible with MIT.
+#
+# These are therefore simple asterisms authored for this project from
+# the conventional Bayer-letter patterns, so the data is unencumbered.
+# Star references were resolved from the Yale catalogue's own Bayer
+# designations rather than typed by hand, and every segment is checked
+# to span less than 35 degrees.
+#
+# Regenerate with tools/fetch-catalog.sh
+abbreviation,name,hr_a,hr_b
+Ori,Orion,2061,1790
+Ori,Orion,1790,1852
+Ori,Orion,1852,1903
+Ori,Orion,1903,1948
+Ori,Orion,1948,2061
+Ori,Orion,1852,1713
+Ori,Orion,1948,2004
+Ori,Orion,1713,2004
+Ori,Orion,1879,2061
+Ori,Orion,1879,1790
+UMa,Ursa Major,4301,4295
+UMa,Ursa Major,4295,4554
+UMa,Ursa Major,4554,4660
+UMa,Ursa Major,4660,4301
+UMa,Ursa Major,4660,4905
+UMa,Ursa Major,4905,5054
+UMa,Ursa Major,5054,5191
+UMi,Ursa Minor,424,6789
+UMi,Ursa Minor,6789,6322
+UMi,Ursa Minor,6322,5903
+UMi,Ursa Minor,5903,5563
+UMi,Ursa Minor,5563,5735
+UMi,Ursa Minor,5735,6116
+UMi,Ursa Minor,6116,5903
+Cas,Cassiopeia,21,168
+Cas,Cassiopeia,168,264
+Cas,Cassiopeia,264,403
+Cas,Cassiopeia,403,542
+Cyg,Cygnus,7924,7796
+Cyg,Cygnus,7796,7615
+Cyg,Cygnus,7615,7417
+Cyg,Cygnus,7528,7796
+Cyg,Cygnus,7796,7949
+Lyr,Lyra,7001,7056
+Lyr,Lyra,7056,7139
+Lyr,Lyra,7139,7178
+Lyr,Lyra,7178,7106
+Lyr,Lyra,7106,7056
+Aql,Aquila,7602,7557
+Aql,Aquila,7557,7525
+Aql,Aquila,7525,7377
+Aql,Aquila,7377,7236
+Leo,Leo,3873,3905
+Leo,Leo,3905,4031
+Leo,Leo,4031,4057
+Leo,Leo,4057,3975
+Leo,Leo,3975,3982
+Leo,Leo,3982,4359
+Leo,Leo,4359,4534
+Leo,Leo,4534,4357
+Leo,Leo,4357,4057
+Leo,Leo,4359,4357
+Tau,Taurus,1239,1346
+Tau,Taurus,1346,1373
+Tau,Taurus,1373,1409
+Tau,Taurus,1409,1457
+Tau,Taurus,1457,1910
+Tau,Taurus,1409,1791
+Gem,Gemini,2891,2990
+Gem,Gemini,2891,2697
+Gem,Gemini,2697,2473
+Gem,Gemini,2473,2286
+Gem,Gemini,2990,2905
+Gem,Gemini,2905,2777
+Gem,Gemini,2777,2650
+Gem,Gemini,2650,2421
+CMa,Canis Major,2294,2491
+CMa,Canis Major,2491,2693
+CMa,Canis Major,2693,2827
+CMa,Canis Major,2693,2618
+CMa,Canis Major,2618,2491
+Boo,Bootes,5340,5506
+Boo,Bootes,5506,5681
+Boo,Bootes,5681,5602
+Boo,Bootes,5602,5435
+Boo,Bootes,5435,5429
+Boo,Bootes,5429,5340
+Aur,Auriga,1708,2088
+Aur,Auriga,2088,2095
+Aur,Auriga,2095,1577
+Aur,Auriga,1577,1605
+Aur,Auriga,1605,1708
+Per,Perseus,834,915
+Per,Perseus,915,1017
+Per,Perseus,1017,1122
+Per,Perseus,1122,1220
+Per,Perseus,1017,936
+And,Andromeda,15,165
+And,Andromeda,165,337
+And,Andromeda,337,603
+Sco,Scorpius,5984,5953
+Sco,Scorpius,5953,5944
+Sco,Scorpius,5953,6084
+Sco,Scorpius,6084,6134
+Sco,Scorpius,6134,6165
+Sco,Scorpius,6165,6241
+Sco,Scorpius,6241,6271
+Sco,Scorpius,6271,6380
+Sco,Scorpius,6380,6553
+Sco,Scorpius,6553,6615
+Sco,Scorpius,6615,6580
+Sco,Scorpius,6580,6527
+Sco,Scorpius,6527,6508
+Sgr,Sagittarius,6746,6859
+Sgr,Sagittarius,6859,6879
+Sgr,Sagittarius,6879,7194
+Sgr,Sagittarius,7194,7234
+Sgr,Sagittarius,7234,7121
+Sgr,Sagittarius,7121,7039
+Sgr,Sagittarius,7039,6859
+Sgr,Sagittarius,7039,6913
+Sgr,Sagittarius,6913,6859
+Cru,Crux,4730,4763
+Cru,Crux,4853,4656
+Cen,Centaurus,5459,5267
+Cen,Centaurus,5267,5132
+Cen,Centaurus,5132,5231
+Cen,Centaurus,5231,4819
+Peg,Pegasus,8781,8775
+Peg,Pegasus,8775,15
+Peg,Pegasus,15,39
+Peg,Pegasus,39,8781
