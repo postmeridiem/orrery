@@ -308,6 +308,10 @@ pub struct Sky {
     /// of it is the middle of the picture.
     pub constellation_min_behind_sun: f32,
     /// Draw the curated deep-sky objects.
+    ///
+    /// Off by default: the procedural rendering of them does not currently look
+    /// good enough to earn its place. The catalogue and positions are sound, so
+    /// this is a rendering problem to revisit, not a data one.
     pub deep_sky: bool,
     pub deep_sky_opacity: f32,
 }
@@ -327,7 +331,7 @@ impl Default for Sky {
             constellations: true,
             constellation_opacity: 0.10,
             constellation_min_behind_sun: 0.8,
-            deep_sky: true,
+            deep_sky: false,
             deep_sky_opacity: 0.55,
         }
     }

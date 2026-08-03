@@ -133,9 +133,12 @@ constellation_opacity = 0.10
 constellation_min_behind_sun = 0.8
 
 # 23 curated deep-sky objects at their true positions -- Orion, Andromeda, the
-# Pleiades, the Magellanic Clouds and so on. Curated rather than exhaustive,
-# because a full catalogue would only be clutter.
-deep_sky = true
+# Pleiades, the Magellanic Clouds and so on.
+#
+# Off for now: the procedural rendering of them is not good enough to earn its
+# place. The catalogue and the positions are sound, so this is a rendering
+# problem to revisit rather than a data one. Set true to see them.
+deep_sky = false
 deep_sky_opacity = 0.55
 
 [orbits]
