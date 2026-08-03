@@ -28,9 +28,21 @@ fi
 say "Installing the default configuration to $config_dir"
 mkdir -p "$config_dir"
 if [ -e "$config_dir/orrery.toml" ]; then
-    # Never clobber settings someone has tuned.
-    cp "$repo_root/config/orrery.toml" "$config_dir/orrery.toml.default"
-    say "Kept your existing orrery.toml; the shipped one is alongside it as orrery.toml.default"
+    # Never clobber settings someone has tuned -- but an existing config from
+    # an older version can name options this build no longer has, and unknown
+    # keys are a hard error by design. Check before leaving it in place.
+    if "$bin_dir/orrery" --check-config >/dev/null 2>&1; then
+        cp "$repo_root/config/orrery.toml" "$config_dir/orrery.toml.default"
+        say "Kept your existing orrery.toml; the shipped one is alongside it as orrery.toml.default"
+    else
+        backup="$config_dir/orrery.toml.backup-$(date +%Y%m%d%H%M%S)"
+        mv "$config_dir/orrery.toml" "$backup"
+        cp "$repo_root/config/orrery.toml" "$config_dir/orrery.toml"
+        warn "Your orrery.toml named options this version no longer has:"
+        "$bin_dir/orrery" --config "$backup" --check-config 2>&1 | sed 's/^/    /' || true
+        warn "It has been moved to $backup and replaced with the current defaults."
+        warn "Re-apply any settings you had tuned from that backup."
+    fi
 else
     cp "$repo_root/config/orrery.toml" "$config_dir/orrery.toml"
 fi
