@@ -15,12 +15,27 @@ elevation_deg = 27.0
 azimuth_deg = 0.0
 # Roll about the view axis: tilts the horizon.
 roll_deg = 0.0
-fov_deg = 38.0
+fov_deg = 55.0
 # Multiplier on the automatically computed framing distance. Above 1 pulls back.
 zoom = 1.0
-# Slow drift of the azimuth. This is where most of the visible motion comes
-# from, since the planets themselves move imperceptibly in real time.
-orbit_speed_deg_per_hour = 1.5
+# Minutes for the camera to travel once around the Sun. Zero holds still.
+#
+# This is what makes the constellations legible: the patch of sky in view sits
+# behind the Sun, so circling the Sun walks that patch through every ecliptic
+# longitude. An hour shows the whole band. Set it to 1.0 to evaluate a full
+# circuit quickly -- the orrery turns with it, since the camera really is
+# orbiting.
+rotation_period_minutes = 60.0
+
+# Days for the viewpoint to rise above the ecliptic and sink below it again,
+# and how far it travels. Zero holds the elevation fixed.
+#
+# A fixed elevation only ever sees one band of sky, and from above the plane
+# that band is southern -- the northern constellations can never appear at all.
+# Letting the viewpoint drift below the plane and back brings the rest of the
+# sky into reach, slowly. Try elevation_cycle_days = 7.0.
+elevation_cycle_days = 0.0
+elevation_cycle_deg = 40.0
 # Fraction of the frame the outermost drawn thing spans. Honoured exactly, at
 # every aspect ratio.
 fill = 0.94
@@ -92,7 +107,7 @@ star_density = 1.0
 star_brightness = 1.0
 # The galactic band is placed using the real IAU galactic pole, so it crosses
 # the solar system at its true angle of roughly 60 degrees to the ecliptic.
-milky_way = 0.80
+milky_way = 0.40
 nebula = 0.35
 # Lifts the darkest sky off pure black. Planet night sides are handled
 # separately, under [lighting].
@@ -110,16 +125,12 @@ magnitude_limit = 6.5
 # turn the wallpaper into a star chart. Raise toward 0.5 to actually study them.
 constellations = true
 constellation_opacity = 0.10
-# A figure is drawn only when the whole of it is comfortably in view, and only
-# when it sits behind the Sun -- the camera always looks at the Sun, so that is
-# the middle of the picture. A constellation cut off by the frame edge does not
-# read as a constellation; it reads as a few stray lines, which is worse than
-# drawing nothing.
-#
-# How far a figure's centre may sit from the Sun and still be drawn, in degrees.
-constellation_max_offset_deg = 26.0
-# Fraction of a figure's stars that must be on screen. 1.0 demands all of it.
-constellation_min_on_screen = 1.0
+# Fraction of a figure's stars that must lie behind the Sun before it is drawn.
+# The viewpoint looks down at the Sun from outside, so the far side of it is the
+# middle of the picture. There is deliberately no "must fit on screen" rule:
+# almost every constellation is larger than the visible band, so demanding whole
+# figures meant nothing was ever drawn.
+constellation_min_behind_sun = 0.8
 
 # 23 curated deep-sky objects at their true positions -- Orion, Andromeda, the
 # Pleiades, the Magellanic Clouds and so on. Curated rather than exhaustive,

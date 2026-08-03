@@ -409,7 +409,17 @@ impl App {
 
         // The camera drift is expressed per hour, so it stays gentle.
         let mut config = self.config.clone();
-        config.camera.azimuth_deg += config.camera.orbit_speed_deg_per_hour * elapsed / 3600.0;
+        if config.camera.rotation_period_minutes > 0.0 {
+            let period = config.camera.rotation_period_minutes * 60.0;
+            config.camera.azimuth_deg += (elapsed as f64 / period * 360.0) as f32;
+        }
+        if config.camera.elevation_cycle_days > 0.0 && config.camera.elevation_cycle_deg > 0.0 {
+            // Rise above the ecliptic and sink below it, so the band of sky in
+            // view drifts north and south over the cycle.
+            let period = config.camera.elevation_cycle_days * 86_400.0;
+            let phase = elapsed as f64 / period * std::f64::consts::TAU;
+            config.camera.elevation_deg += config.camera.elevation_cycle_deg * phase.sin() as f32;
+        }
 
         let scene = Scene::build(&config, &self.lookup, epoch, aspect);
 

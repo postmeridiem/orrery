@@ -120,8 +120,25 @@ pub struct Camera {
     pub fov_deg: f32,
     /// Multiplier on the auto-computed framing distance. Above 1 pulls back.
     pub zoom: f32,
-    /// Slow drift of `azimuth_deg`, in degrees per hour. Zero holds still.
-    pub orbit_speed_deg_per_hour: f32,
+    /// Minutes for the camera to travel once around the Sun. Zero holds still.
+    ///
+    /// This is what makes the constellations legible: the visible patch of sky
+    /// sits behind the Sun, so circling the Sun walks that patch through every
+    /// ecliptic longitude. An hour shows the whole band; set it to 1.0 to
+    /// evaluate a full circuit quickly.
+    ///
+    /// The orrery turns with it, since the camera really is orbiting.
+    pub rotation_period_minutes: f64,
+    /// Days for the camera to rise above the ecliptic and sink below it again.
+    /// Zero holds the elevation fixed.
+    ///
+    /// A fixed elevation only ever sees one band of sky -- from above the plane
+    /// that band is southern, so the northern constellations can never appear.
+    /// Letting the viewpoint drift below the plane and back brings the rest of
+    /// the sky into reach, slowly.
+    pub elevation_cycle_days: f64,
+    /// How far above and below `elevation_deg` that cycle travels, in degrees.
+    pub elevation_cycle_deg: f32,
     /// Fraction of the frame the outermost drawn orbit should span.
     pub fill: f32,
     /// Fit the scene to the frame's *width* rather than to whichever axis binds
@@ -146,9 +163,11 @@ impl Default for Camera {
             elevation_deg: 27.0,
             azimuth_deg: 0.0,
             roll_deg: 0.0,
-            fov_deg: 38.0,
+            fov_deg: 55.0,
             zoom: 1.0,
-            orbit_speed_deg_per_hour: 1.5,
+            rotation_period_minutes: 60.0,
+            elevation_cycle_days: 0.0,
+            elevation_cycle_deg: 40.0,
             fill: 0.94,
             fit_width: true,
             offset_x: 0.0,
@@ -284,14 +303,10 @@ pub struct Sky {
     /// How strongly to draw them. Deliberately very low by default: the lines
     /// are meant to be found by someone looking for them, not to be a diagram.
     pub constellation_opacity: f32,
-    /// How far a figure's centre may sit from the Sun, in degrees, and still be
-    /// drawn. The camera always looks at the Sun, so this is really "how far
-    /// from the middle of the picture".
-    pub constellation_max_offset_deg: f32,
-    /// Fraction of a figure's stars that must be on screen before it is drawn
-    /// at all. A part-cropped figure reads as stray lines, not a constellation,
-    /// so the default demands all of it.
-    pub constellation_min_on_screen: f32,
+    /// Fraction of a figure's stars that must lie behind the Sun before it is
+    /// drawn. The viewpoint looks down at the Sun from outside, so the far side
+    /// of it is the middle of the picture.
+    pub constellation_min_behind_sun: f32,
     /// Draw the curated deep-sky objects.
     pub deep_sky: bool,
     pub deep_sky_opacity: f32,
@@ -303,7 +318,7 @@ impl Default for Sky {
             seed: 0x0B17_5EED,
             star_density: 1.0,
             star_brightness: 1.0,
-            milky_way: 0.80,
+            milky_way: 0.40,
             nebula: 0.35,
             ambient: 0.018,
             rotation_deg: 0.0,
@@ -311,8 +326,7 @@ impl Default for Sky {
             magnitude_limit: 6.5,
             constellations: true,
             constellation_opacity: 0.10,
-            constellation_max_offset_deg: 26.0,
-            constellation_min_on_screen: 1.0,
+            constellation_min_behind_sun: 0.8,
             deep_sky: true,
             deep_sky_opacity: 0.55,
         }
@@ -486,14 +500,17 @@ impl Config {
         if !(0.0..=100.0).contains(&self.lighting.sun_intensity) {
             return Err(ConfigError::Range("lighting.sun_intensity", "0.0 to 100.0"));
         }
-        if !(0.0..=180.0).contains(&self.sky.constellation_max_offset_deg) {
-            return Err(ConfigError::Range(
-                "sky.constellation_max_offset_deg",
-                "0 to 180",
-            ));
+        if !(0.0..=1.0).contains(&self.sky.constellation_min_behind_sun) {
+            return Err(ConfigError::Range("sky.constellation_min_behind_sun", "0.0 to 1.0"));
         }
-        if !(0.0..=1.0).contains(&self.sky.constellation_min_on_screen) {
-            return Err(ConfigError::Range("sky.constellation_min_on_screen", "0.0 to 1.0"));
+        if !(0.0..=10_080.0).contains(&self.camera.rotation_period_minutes) {
+            return Err(ConfigError::Range("camera.rotation_period_minutes", "0 to 10080"));
+        }
+        if !(0.0..=3650.0).contains(&self.camera.elevation_cycle_days) {
+            return Err(ConfigError::Range("camera.elevation_cycle_days", "0 to 3650"));
+        }
+        if !(0.0..=90.0).contains(&self.camera.elevation_cycle_deg) {
+            return Err(ConfigError::Range("camera.elevation_cycle_deg", "0 to 90"));
         }
         if !(-2.0..=6.5).contains(&self.sky.magnitude_limit) {
             return Err(ConfigError::Range("sky.magnitude_limit", "-2.0 to 6.5"));

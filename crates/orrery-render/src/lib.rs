@@ -990,8 +990,6 @@ impl Renderer {
             return;
         }
 
-        let aspect = self.targets.width as f32 / self.targets.height.max(1) as f32;
-        let view_projection = scene.camera.view_projection(aspect);
         // The camera looks at the Sun, so this axis is "behind the Sun".
         let forward = (scene.camera.target - scene.camera.eye).normalize_or(glam::Vec3::NEG_Z);
 
@@ -1009,10 +1007,8 @@ impl Renderer {
                 figure.iter().map(|(a, b)| (orient(*a), orient(*b))).collect();
             if !orrery_core::sky::figure_is_visible(
                 &oriented,
-                view_projection,
                 forward,
-                config.sky.constellation_max_offset_deg,
-                config.sky.constellation_min_on_screen,
+                config.sky.constellation_min_behind_sun,
             ) {
                 continue;
             }
