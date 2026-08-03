@@ -13,7 +13,13 @@ import QtWayland.Compositor.XdgShell
 Item {
     id: root
 
-    /// Wayland socket the client should connect to. Set before the client starts.
+    /// Wayland socket the client should connect to.
+    ///
+    /// This must be assigned as an *initial* property by whoever loads this
+    /// file. WaylandCompositor opens its socket at component completion, and if
+    /// the name is still empty at that point QtWayland falls back to the
+    /// session's own socket, fails to lock it, and calls qFatal -- which kills
+    /// the host process rather than just this component.
     property alias socketName: waylandCompositor.socketName
 
     /// True once a client has actually presented a surface.

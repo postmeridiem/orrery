@@ -12,6 +12,11 @@ import org.kde.kirigami as Kirigami
 ColumnLayout {
     id: root
 
+    // Plasma sets both of these on the configuration root. Without them
+    // declared, every load logs "Cannot assign to non-existent property".
+    property var configDialog
+    property var wallpaperConfiguration
+
     property alias cfg_Command: commandField.text
     property alias cfg_ConfigPath: configPathField.text
 

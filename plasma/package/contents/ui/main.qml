@@ -10,6 +10,9 @@ WallpaperItem {
 
     // One process and one socket per screen, since plasmashell instantiates
     // this wallpaper once per output.
+    // Unique per instance: plasmashell creates one wallpaper per screen, and
+    // two compositors cannot share a socket. Must never collide with the
+    // session's own socket.
     readonly property string socketName:
         "orrery-" + Math.floor(Math.random() * 1000000000)
 
@@ -24,14 +27,29 @@ WallpaperItem {
     Loader {
         id: compositor
         anchors.fill: parent
-        source: "compositor.qml"
 
-        onLoaded: {
-            item.socketName = root.socketName;
-            // The socket only exists once the compositor is constructed, so
-            // the client cannot be launched any earlier than this.
-            root.launch();
+        // The socket name MUST be an initial property.
+        //
+        // WaylandCompositor opens its socket at component completion. Setting
+        // the name afterwards in onLoaded is far too late: the compositor has
+        // already fallen back to the default name, which on a Plasma session is
+        // the inherited WAYLAND_DISPLAY -- KWin's own socket. It cannot lock it,
+        // and QtWayland treats that as fatal, so it takes plasmashell down with
+        // it. setSource() applies these properties before completion, which is
+        // exactly what it exists for.
+        Component.onCompleted: {
+            // Belt and braces: never construct the compositor without a name.
+            // An empty one makes QtWayland fall back to the session socket and
+            // abort the whole process, so refusing to load is strictly better
+            // than taking plasmashell down.
+            if (!root.socketName || root.socketName.length === 0) {
+                console.warn("orrery: no socket name, refusing to start the compositor");
+                return;
+            }
+            setSource("compositor.qml", { "socketName": root.socketName });
         }
+
+        onLoaded: root.launch()
     }
 
     P5Support.DataSource {
