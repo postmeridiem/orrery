@@ -483,7 +483,13 @@ fn frame_camera(config: &Config, framing_radius: f32, extent: f32, aspect: f32) 
     let forward = -direction;
     // Derived from the azimuth rather than from `forward x up`, which
     // degenerates at the poles.
-    let right = Vec3::new(-azimuth.sin(), 0.0, azimuth.cos());
+    // This is `normalize(forward x world_up)`, written out in terms of the
+    // azimuth because the cross product degenerates when the camera is directly
+    // over a pole. Getting its sign wrong negates `up` too, which rotates the
+    // whole picture 180 degrees -- subtle on a near-symmetric scene, but it puts
+    // the near edge of every ring at the top instead of the bottom, so the
+    // orbits appear to climb away from the ecliptic as they go outward.
+    let right = Vec3::new(azimuth.sin(), 0.0, -azimuth.cos());
     let up = right.cross(forward).normalize_or(Vec3::Y);
     let target = right * (camera.offset_x * extent) + up * (camera.offset_y * extent);
     let roll = Quat::from_axis_angle(forward, camera.roll_deg.to_radians());
@@ -681,6 +687,52 @@ mod tests {
                 ndc.x.abs(),
                 config.camera.fill
             );
+        }
+    }
+
+    /// The camera must never be upside down, and the near side of an orbit must
+    /// project *below* the Sun.
+    ///
+    /// A negated `right` vector negates `up` with it, rotating the picture 180
+    /// degrees. On a scene this close to symmetric that is easy to miss: it
+    /// reads as the outer orbits drifting above the ecliptic rather than as an
+    /// obviously flipped image.
+    #[test]
+    fn the_camera_is_the_right_way_up() {
+        for azimuth in [0.0, 45.0, 90.0, 180.0, 270.0, 330.0] {
+            for elevation in [2.0, 6.0, 27.0, 60.0] {
+                let mut config = Config::default();
+                config.camera.azimuth_deg = azimuth;
+                config.camera.elevation_deg = elevation;
+                let scene = Scene::build(&config, &Lookup::builtin(), EPOCH, 16.0 / 9.0);
+
+                assert!(
+                    scene.camera.up.y > 0.0,
+                    "azimuth {azimuth}, elevation {elevation}: up is {:?}",
+                    scene.camera.up
+                );
+
+                // The point of an orbit nearest the camera must land below the
+                // Sun on screen, because the camera looks down on the plane.
+                let view_projection = scene.camera.view_projection(16.0 / 9.0);
+                let ring = scene.orbits.last().expect("an orbit to test");
+                let nearest = ring
+                    .points
+                    .iter()
+                    .min_by(|a, b| {
+                        (**a - scene.camera.eye)
+                            .length()
+                            .total_cmp(&(**b - scene.camera.eye).length())
+                    })
+                    .unwrap();
+                let clip = view_projection * nearest.extend(1.0);
+                let ndc_y = (clip.truncate() / clip.w).y;
+                assert!(
+                    ndc_y < 0.0,
+                    "azimuth {azimuth}, elevation {elevation}: the near side of the \
+                     outermost orbit projected above centre at y={ndc_y}"
+                );
+            }
         }
     }
 
