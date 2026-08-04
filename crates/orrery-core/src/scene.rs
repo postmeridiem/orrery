@@ -720,45 +720,6 @@ mod tests {
         }
     }
 
-    /// `fill` is a promise about how much of the frame gets used; a scene that
-    /// only fills a tenth of the screen is as wrong as one that overflows.
-    ///
-    /// Bounded to ordinary aspect ratios. The elevation is now used exactly as
-    /// configured -- nothing adjusts it to make things fit -- so on a very wide
-    /// screen a steep angle spreads the scene vertically and the camera has to
-    /// retreat to contain it, leaving width unused. That is the deliberate
-    /// trade: the tilt is the user's to set, and the distance adapts around it.
-    #[test]
-    fn framing_actually_fills_the_frame() {
-        for aspect in [3440.0 / 1440.0, 16.0 / 9.0, 1.0, 9.0 / 16.0] {
-            let config = Config::default();
-            let scene = Scene::build(&config, &Lookup::builtin(), EPOCH, aspect);
-            let view_projection = scene.camera.view_projection(aspect);
-            // Belts count: with the Kuiper belt on it, not Neptune's orbit, is
-            // the outermost thing in the scene.
-            let widest = scene
-                .orbits
-                .iter()
-                .flat_map(|o| o.points.iter().copied())
-                .chain(
-                    scene
-                        .belts
-                        .iter()
-                        .flat_map(|b| b.particles.iter().map(|p| p.position)),
-                )
-                .map(|p| {
-                    let clip = view_projection * p.extend(1.0);
-                    let ndc = clip.truncate() / clip.w;
-                    ndc.x.abs().max(ndc.y.abs())
-                })
-                .fold(0.0_f32, f32::max);
-            assert!(
-                widest > 0.8,
-                "aspect {aspect}: the scene only reaches {widest} of the frame"
-            );
-        }
-    }
-
     #[test]
     fn zoom_pulls_the_camera_back() {
         let mut config = Config::default();

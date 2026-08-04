@@ -13,10 +13,10 @@ struct Globals {
     sky_b: vec4<f32>,
     // width, height, 1/width, 1/height.
     viewport: vec4<f32>,
-    // exposure multiplier, bloom intensity, bloom radius, orbit width in pixels.
+    // exposure multiplier, bloom intensity, unused, orbit width in pixels.
     post: vec4<f32>,
     // angular size of one pixel in radians, star core radius in pixels,
-    // constellation opacity, deep-sky opacity.
+    // constellation opacity, unused.
     sky_c: vec4<f32>,
     // night-side brightness, night-side saturation, day-side saturation,
     // Sun emission intensity.

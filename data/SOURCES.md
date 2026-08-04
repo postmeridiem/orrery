@@ -42,6 +42,13 @@ terminate exactly on catalogue stars.
 
 ## Deep-sky objects — `deep_sky.csv`
 
+**Not currently rendered.** The procedural drawing of these did not look good
+enough to keep, so the GPU path was removed. The file, the parser and the tests
+that cross-check it against the star catalogue all remain, because the positions
+are sound and were expensive to verify — the coordinates below are still the
+reference if the rendering is ever revisited.
+
+
 Positions and angular sizes verified against SIMBAD, operated at CDS,
 Strasbourg, France. The object selection is ours; magnitudes are deliberately
 not used (see the file header).

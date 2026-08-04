@@ -198,7 +198,7 @@ const BUNDLED_ALMANAC: &str = include_str!("../../../data/almanac.toml");
 
 /// Hand the star catalogue to the renderer, tolerating a broken one.
 fn load_catalog_into(renderer: &mut Renderer, device: &wgpu::Device, config: &Config) {
-    if !config.sky.real_stars && !config.sky.constellations && !config.sky.deep_sky {
+    if !config.sky.real_stars && !config.sky.constellations {
         return;
     }
     match orrery_core::sky::Catalog::embedded() {

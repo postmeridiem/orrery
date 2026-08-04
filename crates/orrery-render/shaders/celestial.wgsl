@@ -24,18 +24,8 @@ struct Segment {
     endpoint_b: vec4<f32>,
 };
 
-struct DeepSkyObject {
-    // xyz = unit direction, w = angular radius in radians.
-    direction_radius: vec4<f32>,
-    // rgb = tint, a = prominence.
-    colour: vec4<f32>,
-    // kind, unused, unused, unused.
-    params: vec4<f32>,
-};
-
 @group(1) @binding(0) var<storage, read> stars: array<Star>;
 @group(1) @binding(1) var<storage, read> segments: array<Segment>;
-@group(1) @binding(2) var<storage, read> deep_sky: array<DeepSkyObject>;
 
 /// The four corners of a unit quad, as a triangle strip.
 fn quad_corner(vertex_index: u32) -> vec2<f32> {
@@ -169,90 +159,4 @@ fn constellation_fragment(in: LineVertex) -> @location(0) vec4<f32> {
     // A cool grey-blue, so the figures read as drawn lines rather than as
     // anything astronomical.
     return vec4<f32>(vec3<f32>(0.52, 0.64, 0.85) * brightness, 1.0);
-}
-
-// --- deep-sky objects -------------------------------------------------------
-
-const KIND_EMISSION: f32 = 0.0;
-const KIND_PLANETARY: f32 = 1.0;
-const KIND_GLOBULAR: f32 = 2.0;
-const KIND_OPEN: f32 = 3.0;
-const KIND_GALAXY: f32 = 4.0;
-const KIND_REMNANT: f32 = 5.0;
-
-struct DeepSkyVertex {
-    @builtin(position) clip_position: vec4<f32>,
-    @location(0) offset: vec2<f32>,
-    @location(1) colour: vec3<f32>,
-    @location(2) prominence: f32,
-    @location(3) @interpolate(flat) kind: f32,
-    @location(4) @interpolate(flat) seed: f32,
-};
-
-@vertex
-fn deep_sky_vertex(
-    @builtin(vertex_index) vertex_index: u32,
-    @builtin(instance_index) instance_index: u32,
-) -> DeepSkyVertex {
-    let object = deep_sky[instance_index];
-    let centre = project_sky(oriented(object.direction_radius.xyz));
-
-    // Angular radius -> pixels, via the pixel angular size. Padded out, because
-    // the procedural falloff needs room to fade rather than clip at the quad.
-    let radius_pixels = max(object.direction_radius.w / globals.sky_c.x * 2.2, 6.0);
-
-    let corner = quad_corner(vertex_index);
-    let pixel_to_ndc = vec2<f32>(globals.viewport.z, globals.viewport.w) * 2.0;
-
-    var out: DeepSkyVertex;
-    out.clip_position = vec4<f32>(
-        centre.xy + corner * radius_pixels * pixel_to_ndc * centre.w,
-        centre.zw,
-    );
-    out.offset = corner;
-    out.colour = object.colour.rgb;
-    out.prominence = object.colour.a;
-    out.kind = object.params.x;
-    out.seed = f32(instance_index) * 17.3 + 1.0;
-    return out;
-}
-
-@fragment
-fn deep_sky_fragment(in: DeepSkyVertex) -> @location(0) vec4<f32> {
-    let radius = length(in.offset);
-    if (radius > 1.0) {
-        discard;
-    }
-
-    // A common radial falloff, then per-kind structure on top.
-    var density = exp(-radius * radius * 3.0);
-    let noise_position = vec3<f32>(in.offset * 2.5, in.seed);
-
-    if (in.kind == KIND_GLOBULAR) {
-        // Sharply concentrated toward the core.
-        density = exp(-radius * radius * 11.0) + 0.25 * exp(-radius * radius * 3.0);
-    } else if (in.kind == KIND_OPEN) {
-        // Loose and clumpy rather than a smooth ball.
-        density = density * (0.35 + 1.15 * fbm(noise_position * 2.2, 4));
-    } else if (in.kind == KIND_GALAXY) {
-        // Flattened, with a bright nucleus.
-        let flattened = length(in.offset * vec2<f32>(1.0, 2.4));
-        density = exp(-flattened * flattened * 2.6) + 0.5 * exp(-radius * radius * 16.0);
-    } else if (in.kind == KIND_PLANETARY) {
-        // A shell: bright rim, hollow middle.
-        density = exp(-pow((radius - 0.45) * 3.4, 2.0));
-    } else if (in.kind == KIND_REMNANT) {
-        density = density * (0.2 + 1.5 * ridged(noise_position * 3.5, 4));
-    } else {
-        // Emission nebulosity: soft, filamentary, domain-warped.
-        let warp = vec3<f32>(
-            fbm(noise_position * 1.6, 3),
-            fbm(noise_position * 1.6 + 11.0, 3),
-            0.0,
-        );
-        density = density * (0.25 + 1.35 * fbm(noise_position * 1.9 + warp, 5));
-    }
-
-    let brightness = density * in.prominence * globals.sky_c.w;
-    return vec4<f32>(in.colour * max(brightness, 0.0), 1.0);
 }

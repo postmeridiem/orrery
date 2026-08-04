@@ -311,9 +311,6 @@ pub struct Sky {
     /// drawn. The viewpoint looks down at the Sun from outside, so the far side
     /// of it is the middle of the picture.
     pub constellation_min_behind_sun: f32,
-    /// Draw the curated deep-sky objects.
-    pub deep_sky: bool,
-    pub deep_sky_opacity: f32,
 }
 
 impl Default for Sky {
@@ -331,8 +328,6 @@ impl Default for Sky {
             constellations: true,
             constellation_opacity: 0.10,
             constellation_min_behind_sun: 0.8,
-            deep_sky: true,
-            deep_sky_opacity: 0.55,
         }
     }
 }
@@ -378,12 +373,7 @@ pub struct Render {
     /// Exposure applied before tone mapping, in stops.
     pub exposure_stops: f32,
     pub bloom_intensity: f32,
-    /// Radius of the bloom, as a fraction of screen height.
-    pub bloom_radius: f32,
     pub vsync: bool,
-    /// Render at a fraction of native resolution and upscale. Cheap way to run
-    /// a 4K wallpaper on a modest GPU.
-    pub resolution_scale: f32,
 }
 
 impl Default for Render {
@@ -393,9 +383,7 @@ impl Default for Render {
             msaa: 4,
             exposure_stops: 0.0,
             bloom_intensity: 0.09,
-            bloom_radius: 0.06,
             vsync: true,
-            resolution_scale: 1.0,
         }
     }
 }
@@ -485,9 +473,6 @@ impl Config {
         }
         if !matches!(self.render.msaa, 1 | 2 | 4 | 8) {
             return Err(ConfigError::Range("render.msaa", "1, 2, 4 or 8"));
-        }
-        if !(0.1..=1.0).contains(&self.render.resolution_scale) {
-            return Err(ConfigError::Range("render.resolution_scale", "0.1 to 1.0"));
         }
         if self.orbits.segments < 16 {
             return Err(ConfigError::Range("orbits.segments", "at least 16"));
@@ -613,7 +598,6 @@ mod tests {
             "[camera]\nelevation_deg = 120.0\n",
             "[camera]\nzoom = 0.0\n",
             "[render]\nmsaa = 3\n",
-            "[render]\nresolution_scale = 2.0\n",
             "[orbits]\nsegments = 4\n",
             "[scale.orbit]\nlaw = \"power\"\nunits_per_au = 1.0\nexponent = -1.0\n",
         ] {

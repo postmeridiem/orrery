@@ -136,11 +136,6 @@ constellation_opacity = 0.10
 # figures meant nothing was ever drawn.
 constellation_min_behind_sun = 0.8
 
-# 23 curated deep-sky objects at their true positions -- Orion, Andromeda, the
-# Pleiades, the Magellanic Clouds and so on. Curated rather than exhaustive,
-# because a full catalogue would only be clutter.
-deep_sky = true
-deep_sky_opacity = 0.55
 
 [orbits]
 enabled = true
@@ -159,9 +154,7 @@ fps = 30
 msaa = 4
 exposure_stops = 0.0
 bloom_intensity = 0.09
-bloom_radius = 0.06
 vsync = true
-resolution_scale = 1.0
 
 [ephemeris]
 # Where positions come from.
