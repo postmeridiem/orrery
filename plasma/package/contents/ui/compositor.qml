@@ -30,9 +30,16 @@ Item {
 
         // Bind the nested compositor's output to the window the wallpaper is
         // being drawn into, so the client is told the right size and scale.
+        //
+        // Attached to `root`, not to the output. `Window.window` is an attached
+        // property of Item, and WaylandOutput is a plain QObject -- writing it
+        // bare here resolved to nothing, so the compositor came up with no
+        // output at all, the client was never told a size, and the renderer
+        // died in Wayland cleanup. Plasma reported that as the wallpaper
+        // failing to load and fell back to org.kde.image.
         WaylandOutput {
             sizeFollowsWindow: true
-            window: Window.window
+            window: root.Window.window
         }
 
         XdgShell {
