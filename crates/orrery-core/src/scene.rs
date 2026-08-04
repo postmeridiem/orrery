@@ -720,6 +720,54 @@ mod tests {
         }
     }
 
+    /// The camera must never be upside down, and the near side of an orbit must
+    /// project *below* the Sun.
+    ///
+    /// This guards a bug that actually happened: a `right` vector with the wrong
+    /// sign negates `up` with it and rotates the whole picture 180 degrees. On a
+    /// scene this close to symmetric that is easy to miss -- it does not look
+    /// like a flipped image, it looks like the outer orbits drifting above the
+    /// ecliptic. Asserting `up.y > 0` alone is not enough to catch a basis that
+    /// is only slightly wrong; the second assertion is the one with teeth.
+    #[test]
+    fn the_camera_is_the_right_way_up() {
+        for azimuth in [0.0, 45.0, 90.0, 180.0, 270.0, 330.0] {
+            for elevation in [2.0, 6.0, 27.0, 60.0] {
+                let mut config = Config::default();
+                config.camera.azimuth_deg = azimuth;
+                config.camera.elevation_deg = elevation;
+                let scene = Scene::build(&config, &Lookup::builtin(), EPOCH, 16.0 / 9.0);
+
+                assert!(
+                    scene.camera.up.y > 0.0,
+                    "azimuth {azimuth}, elevation {elevation}: up is {:?}",
+                    scene.camera.up
+                );
+
+                // The point of an orbit nearest the camera must land below the
+                // Sun on screen, because the camera looks down on the plane.
+                let view_projection = scene.camera.view_projection(16.0 / 9.0);
+                let ring = scene.orbits.last().expect("an orbit to test");
+                let nearest = ring
+                    .points
+                    .iter()
+                    .min_by(|a, b| {
+                        (**a - scene.camera.eye)
+                            .length()
+                            .total_cmp(&(**b - scene.camera.eye).length())
+                    })
+                    .unwrap();
+                let clip = view_projection * nearest.extend(1.0);
+                let ndc_y = (clip.truncate() / clip.w).y;
+                assert!(
+                    ndc_y < 0.0,
+                    "azimuth {azimuth}, elevation {elevation}: the near side of the \
+                     outermost orbit projected above centre at y={ndc_y}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn zoom_pulls_the_camera_back() {
         let mut config = Config::default();
