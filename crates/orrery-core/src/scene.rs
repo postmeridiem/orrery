@@ -744,28 +744,106 @@ mod tests {
                     scene.camera.up
                 );
 
-                // The point of an orbit nearest the camera must land below the
-                // Sun on screen, because the camera looks down on the plane.
+                // Looking down on the ecliptic means a point in the plane on the
+                // camera's side of the Sun appears *below* the Sun, and one on
+                // the far side appears above it.
+                //
+                // Probe with constructed points rather than orbit vertices. A
+                // vertex of the outermost ring can fall behind the camera at a
+                // tight zoom, and dividing by a negative `w` flips the sign --
+                // which reads as an inversion when the basis is in fact fine.
                 let view_projection = scene.camera.view_projection(16.0 / 9.0);
-                let ring = scene.orbits.last().expect("an orbit to test");
-                let nearest = ring
-                    .points
-                    .iter()
-                    .min_by(|a, b| {
-                        (**a - scene.camera.eye)
-                            .length()
-                            .total_cmp(&(**b - scene.camera.eye).length())
-                    })
-                    .unwrap();
-                let clip = view_projection * nearest.extend(1.0);
-                let ndc_y = (clip.truncate() / clip.w).y;
+                let ndc_y = |point: Vec3| {
+                    let clip = view_projection * point.extend(1.0);
+                    assert!(
+                        clip.w > 0.0,
+                        "azimuth {azimuth}, elevation {elevation}: probe {point:?} \
+                         landed behind the camera"
+                    );
+                    (clip.truncate() / clip.w).y
+                };
+
+                // Halfway from the Sun towards the camera, in the plane.
+                let towards_camera =
+                    Vec3::new(scene.camera.eye.x, 0.0, scene.camera.eye.z) * 0.5;
+                let sun_y = ndc_y(Vec3::ZERO);
+                let near_y = ndc_y(towards_camera);
+                let far_y = ndc_y(-towards_camera);
+
                 assert!(
-                    ndc_y < 0.0,
+                    near_y < sun_y,
                     "azimuth {azimuth}, elevation {elevation}: the near side of the \
-                     outermost orbit projected above centre at y={ndc_y}"
+                     ecliptic projected at y={near_y}, not below the Sun at y={sun_y}"
+                );
+                assert!(
+                    far_y > sun_y,
+                    "azimuth {azimuth}, elevation {elevation}: the far side of the \
+                     ecliptic projected at y={far_y}, not above the Sun at y={sun_y}"
                 );
             }
         }
+    }
+
+    /// The composition Jeroen locked on 2026-08-04, asserted as numbers.
+    ///
+    /// See `docs/TARGET-COMPOSITION.md` for the reference render and for why
+    /// the outermost orbit deliberately overflows the bottom edge. Two rules
+    /// this test exists to enforce:
+    ///
+    /// * It measures **orbits only**. Its deleted predecessor counted Kuiper
+    ///   belt particles, which fill the frame on their own, and so reported a
+    ///   healthy 0.86 while the orbits sat at 0.28 and the picture was wrong.
+    /// * It excludes points already off the top or bottom, because the near arc
+    ///   of the outer ellipse diverges as the camera closes in. It is the
+    ///   visible silhouette that reads as "how big the system is".
+    ///
+    /// If the camera is re-parameterised, update how the numbers are *produced*
+    /// but not the numbers themselves -- they are the target.
+    #[test]
+    fn the_locked_composition_still_holds() {
+        const ASPECT: f32 = 3440.0 / 1440.0;
+
+        let mut config = Config::default();
+        config.camera.elevation_deg = 16.0;
+        config.camera.zoom = 0.578;
+        config.camera.rotation_period_minutes = 0.0;
+
+        let scene = Scene::build(&config, &Lookup::builtin(), EPOCH, ASPECT);
+        let view_projection = scene.camera.view_projection(ASPECT);
+
+        let outermost = scene.orbits.last().expect("an outermost orbit");
+        let (mut visible_half_width, mut far_edge, mut near_arc) = (0.0f32, 0.0f32, 0.0f32);
+        for point in &outermost.points {
+            let clip = view_projection * point.extend(1.0);
+            if clip.w <= 0.0 {
+                continue;
+            }
+            let ndc = clip.truncate() / clip.w;
+            if ndc.y.abs() <= 1.0 {
+                visible_half_width = visible_half_width.max(ndc.x.abs());
+            }
+            if ndc.y < 0.0 {
+                near_arc = near_arc.max(-ndc.y);
+            } else {
+                far_edge = far_edge.max(ndc.y);
+            }
+        }
+
+        let close = |actual: f32, target: f32, tolerance: f32, what: &str| {
+            assert!(
+                (actual - target).abs() <= tolerance,
+                "{what}: {actual:.3}, target {target:.3} +/- {tolerance}"
+            );
+        };
+        close(visible_half_width, 0.851, 0.02, "visible half-width");
+        close(far_edge, 0.250, 0.02, "far edge above centre");
+        close(near_arc, 1.442, 0.05, "near arc below the bottom edge");
+        close(
+            scene.camera.eye.distance(scene.camera.target),
+            6.2334,
+            0.01,
+            "camera distance",
+        );
     }
 
     #[test]

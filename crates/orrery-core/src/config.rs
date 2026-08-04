@@ -164,11 +164,11 @@ pub struct Camera {
 impl Default for Camera {
     fn default() -> Self {
         Self {
-            elevation_deg: 27.0,
+            elevation_deg: 16.0,
             azimuth_deg: 0.0,
             roll_deg: 0.0,
             fov_deg: 55.0,
-            zoom: 0.785,
+            zoom: 0.578,
             rotation_period_minutes: 60.0,
             elevation_cycle_days: 0.0,
             elevation_cycle_deg: 40.0,

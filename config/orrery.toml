@@ -10,7 +10,7 @@
 # Angle above the ecliptic plane. 90 looks straight down on the solar system,
 # 0 is edge-on. The default is the oblique three-quarter view that makes the
 # orbits read as ellipses rather than circles.
-elevation_deg = 27.0
+elevation_deg = 16.0
 # Rotation about the ecliptic pole: spins the whole system within the frame.
 azimuth_deg = 0.0
 # Roll about the view axis: tilts the horizon.
@@ -21,7 +21,7 @@ fov_deg = 55.0
 # The framing fits the whole scene inside the frame, which leaves the Kuiper
 # belt sitting exactly at the edges. 0.785 crops in by 1.274x so the belt runs
 # off the sides instead.
-zoom = 0.785
+zoom = 0.578
 # Minutes for the camera to travel once around the Sun. Zero holds still.
 #
 # This is what makes the constellations legible: the patch of sky in view sits
@@ -49,9 +49,9 @@ fill = 0.94
 # both axes leaves it floating with the width unused. Filling the width means
 # the vertical extent must fit too -- and that is a function of the tilt: a ring
 # spanning the full width projects to about `fill * aspect * sin(elevation)` of
-# the half-height. On a 21:9 screen that overflows above roughly 25 degrees, so
-# rather than let it clip, the elevation is automatically lowered until it fits.
-# Your `elevation_deg` is therefore a maximum, not an exact value.
+# the half-height, so on a wide screen a steep tilt pushes the near arc of the
+# outermost orbit off the bottom edge. That is allowed and intended:
+# `elevation_deg` is honoured exactly and is never adjusted to make things fit.
 fit_width = true
 # Shift the system within the frame, in fractions of the viewport. Handy for
 # keeping the Sun out from behind a column of desktop icons.
