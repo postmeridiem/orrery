@@ -39,6 +39,52 @@ const MAX_BLOOM_MIPS: u32 = 6;
 /// enough that it does not alias into a flickering single pixel.
 const STAR_CORE_RADIUS_PIXELS: f32 = 0.9;
 
+/// Settled look. These were configuration fields until 2026-08-04; none of them
+/// had been changed since they were tuned, and each one was another value to
+/// hold fixed when comparing two renders. They are the look the composition was
+/// signed off against, so they live here rather than in a file someone edits.
+mod look {
+    /// Multisample count. 4x is the knee: 8x costs half the frame rate again
+    /// for a difference invisible on orbit lines a pixel and a half wide.
+    pub const MSAA: u32 = 4;
+    /// Exposure before tone mapping, as a linear multiplier — `2^stops` with
+    /// stops at zero. ACES is doing the work; this is the escape hatch that
+    /// turned out never to be needed.
+    pub const EXPOSURE: f32 = 1.0;
+    pub const BLOOM_INTENSITY: f32 = 0.09;
+    /// Orbit line width in physical pixels.
+    pub const ORBIT_WIDTH_PX: f32 = 1.4;
+    /// How much brighter the ring runs just behind each planet, and over what
+    /// fraction of the orbit. It gives a sense of which way the planet travels.
+    pub const TRAIL_STRENGTH: f32 = 2.2;
+    pub const TRAIL_LENGTH: f32 = 0.22;
+
+    /// Seed for the procedural sky. Any value is as valid as any other; this
+    /// one is the sky that was looked at.
+    pub const SKY_SEED: u32 = 0x0B17_5EED;
+    /// Relative density of the procedural stars, which sit *under* the real
+    /// catalogue and supply the sub-naked-eye haze a photograph shows.
+    pub const STAR_DENSITY: f32 = 1.0;
+    /// Coloured nebulosity, and the floor that lifts the darkest sky off pure
+    /// black. Planet night sides are handled separately, under `[lighting]`.
+    pub const NEBULA: f32 = 0.35;
+    pub const AMBIENT: f32 = 0.018;
+    /// Rotation of the generated sky about the ecliptic pole. Zero — the real
+    /// catalogue is at its true orientation and the procedural layer has to
+    /// agree with it. Kept named because the shader takes a cos/sin pair and
+    /// the figure-visibility test must use the same one.
+    pub const SKY_ROTATION_DEG: f32 = 0.0;
+    /// Faintest catalogued star drawn. The catalogue runs to 6.5, which is the
+    /// naked-eye limit under a dark sky — there is nothing fainter to ask for.
+    pub const MAGNITUDE_LIMIT: f32 = 6.5;
+    /// Fraction of a figure's stars that must lie behind the Sun before it is
+    /// drawn. The viewpoint looks down at the Sun from outside, so the far side
+    /// of it is the middle of the picture. There is deliberately no "must fit
+    /// on screen" rule: almost every constellation is larger than the visible
+    /// band, so demanding whole figures meant nothing was ever drawn.
+    pub const CONSTELLATION_MIN_BEHIND_SUN: f32 = 0.8;
+}
+
 /// How a body's surface is synthesised. Must match the `KIND_*` constants in
 /// `body.wgsl`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -250,9 +296,8 @@ impl Renderer {
         output_format: wgpu::TextureFormat,
         width: u32,
         height: u32,
-        config: &Config,
     ) -> Self {
-        let sample_count = config.render.msaa.max(1);
+        let sample_count = look::MSAA;
 
         let common = include_str!("../shaders/common.wgsl");
         let make_shader = |label: &str, source: &str, with_common: bool| {
@@ -832,9 +877,9 @@ impl Renderer {
     ///
     /// Done once: this data is fixed, so the buffers are built at start-up and
     /// only the magnitude cut-off is applied here.
-    pub fn set_catalog(&mut self, device: &wgpu::Device, catalog: &Catalog, config: &Config) {
+    pub fn set_catalog(&mut self, device: &wgpu::Device, catalog: &Catalog) {
         let stars: Vec<GpuStar> = catalog
-            .stars_to_magnitude(config.sky.magnitude_limit)
+            .stars_to_magnitude(look::MAGNITUDE_LIMIT)
             .map(|star| GpuStar {
                 direction_magnitude: [
                     star.direction.x,
@@ -860,7 +905,7 @@ impl Renderer {
         log::info!(
             "sky: {} stars to magnitude {}, {} constellation segments",
             stars.len(),
-            config.sky.magnitude_limit,
+            look::MAGNITUDE_LIMIT,
             segments.len()
         );
 
@@ -915,21 +960,16 @@ impl Renderer {
     /// kept or dropped together: a figure cut off by the frame edge reads as
     /// stray lines rather than as a constellation, which is worse than showing
     /// nothing.
-    fn select_visible_figures(&mut self, queue: &wgpu::Queue, scene: &Scene, config: &Config) {
+    fn select_visible_figures(&mut self, queue: &wgpu::Queue, scene: &Scene) {
         let Some(celestial) = &mut self.celestial else {
             return;
         };
-        if !config.sky.constellations {
-            celestial.segment_count = 0;
-            return;
-        }
-
         // The camera looks at the Sun, so this axis is "behind the Sun".
         let forward = (scene.camera.target - scene.camera.eye).normalize_or(glam::Vec3::NEG_Z);
 
         // The shader rotates catalogue directions by the sky rotation, so the
         // visibility test has to see the same orientation.
-        let rotation = config.sky.rotation_deg.to_radians();
+        let rotation = look::SKY_ROTATION_DEG.to_radians();
         let (sin, cos) = rotation.sin_cos();
         let orient = |v: glam::Vec3| {
             glam::Vec3::new(v.x * cos + v.z * sin, v.y, -v.x * sin + v.z * cos)
@@ -942,7 +982,7 @@ impl Renderer {
             if !orrery_core::sky::figure_is_visible(
                 &oriented,
                 forward,
-                config.sky.constellation_min_behind_sun,
+                look::CONSTELLATION_MIN_BEHIND_SUN,
             ) {
                 continue;
             }
@@ -999,15 +1039,15 @@ impl Renderer {
         let (sphere_instances, ring_instances) = self.upload_instances(device, queue, scene);
         self.upload_orbits(device, queue, scene, config);
         self.upload_belts(device, queue, scene);
-        self.select_visible_figures(queue, scene, config);
+        self.select_visible_figures(queue, scene);
 
         queue.write_buffer(
             &self.tonemap_settings,
             0,
             bytemuck::bytes_of(&GpuTonemapSettings {
                 values: [
-                    2.0_f32.powf(config.render.exposure_stops),
-                    config.render.bloom_intensity,
+                    look::EXPOSURE,
+                    look::BLOOM_INTENSITY,
                     0.0,
                     0.0,
                 ],
@@ -1017,13 +1057,7 @@ impl Renderer {
         let mut encoder =
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
 
-        self.scene_pass(
-            &mut encoder,
-            sphere_instances,
-            ring_instances,
-            config.sky.real_stars,
-            config.sky.constellations,
-        );
+        self.scene_pass(&mut encoder, sphere_instances, ring_instances);
         self.bloom_pass(&mut encoder);
         self.tonemap_pass(&mut encoder, output);
 
@@ -1039,7 +1073,7 @@ impl Renderer {
         elapsed_seconds: f32,
     ) {
         let view_projection = scene.camera.view_projection(aspect);
-        let rotation = config.sky.rotation_deg.to_radians();
+        let rotation = look::SKY_ROTATION_DEG.to_radians();
         let globals = GpuGlobals {
             view_projection: view_projection.to_cols_array_2d(),
             inverse_view_projection: view_projection.inverse().to_cols_array_2d(),
@@ -1051,17 +1085,17 @@ impl Renderer {
             ],
             sun: [0.0, 0.0, 0.0, scene.sun.radius],
             sky_a: [
-                config.sky.star_density,
+                look::STAR_DENSITY,
                 config.sky.star_brightness,
                 config.sky.milky_way,
-                config.sky.nebula,
+                look::NEBULA,
             ],
             sky_b: [
-                config.sky.ambient,
+                look::AMBIENT,
                 rotation.cos(),
                 rotation.sin(),
                 // Kept small and exactly representable; the shader casts it to u32.
-                (config.sky.seed % 1_048_576) as f32,
+                (look::SKY_SEED % 1_048_576) as f32,
             ],
             viewport: [
                 self.targets.width as f32,
@@ -1070,11 +1104,11 @@ impl Renderer {
                 1.0 / self.targets.height as f32,
             ],
             post: [
-                2.0_f32.powf(config.render.exposure_stops),
-                config.render.bloom_intensity,
+                look::EXPOSURE,
+                look::BLOOM_INTENSITY,
                 // Spare slot; the vec4 has to stay 16-byte aligned.
                 0.0,
-                config.orbits.width_px,
+                look::ORBIT_WIDTH_PX,
             ],
             sky_c: [
                 // One pixel's angular size, so stars can be sized in pixels
@@ -1189,10 +1223,10 @@ impl Renderer {
                 // The planet travels toward increasing `along`, so the trail is
                 // the stretch just behind it.
                 let behind = (ring.body_fraction - along).rem_euclid(1.0);
-                let trail_length = config.orbits.trail_length.clamp(1e-4, 1.0);
+                let trail_length = look::TRAIL_LENGTH;
                 let falloff = (1.0 - behind / trail_length).max(0.0);
                 let brightness = config.orbits.opacity
-                    * (1.0 + config.orbits.trail_strength * falloff * falloff);
+                    * (1.0 + look::TRAIL_STRENGTH * falloff * falloff);
 
                 for side in [-1.0_f32, 1.0] {
                     vertices.push(GpuOrbitVertex {
@@ -1227,8 +1261,6 @@ impl Renderer {
         encoder: &mut wgpu::CommandEncoder,
         sphere_instances: std::ops::Range<u32>,
         ring_instances: std::ops::Range<u32>,
-        draw_stars: bool,
-        draw_constellations: bool,
     ) {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("scene"),
@@ -1264,12 +1296,12 @@ impl Renderer {
         // Real sky on top of the procedural haze, still behind the planets.
         if let Some(celestial) = &self.celestial {
             pass.set_bind_group(1, &celestial.bind_group, &[]);
-            if celestial.segment_count > 0 && draw_constellations {
+            if celestial.segment_count > 0 {
                 pass.set_pipeline(&self.constellation_pipeline);
                 pass.draw(0..4, 0..celestial.segment_count);
             }
             // Stars last, so they sit over the nebulosity they are embedded in.
-            if celestial.star_count > 0 && draw_stars {
+            if celestial.star_count > 0 {
                 pass.set_pipeline(&self.star_pipeline);
                 pass.draw(0..4, 0..celestial.star_count);
             }

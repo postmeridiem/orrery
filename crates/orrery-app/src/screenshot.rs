@@ -62,9 +62,9 @@ pub fn capture(
     });
     let view = target.create_view(&Default::default());
 
-    let mut renderer = Renderer::new(&device, format, width, height, config);
+    let mut renderer = Renderer::new(&device, format, width, height);
     match orrery_core::sky::Catalog::embedded() {
-        Ok(catalog) => renderer.set_catalog(&device, &catalog, config),
+        Ok(catalog) => renderer.set_catalog(&device, &catalog),
         Err(error) => log::warn!("could not load the star catalogue: {error}"),
     }
     let epoch = config

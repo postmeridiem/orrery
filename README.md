@@ -207,13 +207,21 @@ Everything lives in `~/.config/orrery/orrery.toml`, which is re-read whenever
 you save it — no restart. Every key is optional and documented inline; see
 [`config/orrery.toml`](config/orrery.toml).
 
+There are 31 of them. There were 49, most added to debug something and never
+taken out; the rest are constants in the code now, at the place each is used.
+Removing a key is a breaking change, because unknown keys are a hard error by
+design — so `install.sh` runs `--check-config` against an existing config, and
+if it names a key this version no longer has, moves it aside and quotes the
+offending line back to you rather than leaving the wallpaper refusing to start.
+
 The knobs you are most likely to want:
 
 ```toml
 [camera]
-elevation_deg = 27.0   # 90 = straight down on the system, 0 = edge-on
-offset_x = 0.0         # shift the Sun out from behind your desktop icons
-offset_y = 0.0
+elevation_deg = 16.0    # 90 = straight down on the system, 0 = edge-on
+frame_radius_au = 35.33 # this heliocentric radius lands on the left/right edges
+offset_x = 0.0          # shift the Sun out from behind your desktop icons
+offset_y = 0.27         # 0.27 puts the Sun 23% from the nearer edge
 
 [time]
 days_per_second = 0.0  # 0 = real time. Set 1 to watch the system turn.
@@ -228,15 +236,12 @@ night_saturation = 0.15      # ...but loses its colour
 day_saturation = 1.35        # lit side pushed past true albedo, for contrast
 
 [sky]
-real_stars = true            # the catalogue; false leaves a procedural sky
-magnitude_limit = 6.5        # naked-eye limit
-constellations = true
+star_brightness = 1.0
+milky_way = 0.40
 constellation_opacity = 0.10 # very faint on purpose
-deep_sky = true
 
 [render]
 fps = 30               # a wallpaper needs no more
-resolution_scale = 1.0 # drop to 0.75 on a modest GPU at 4K
 
 [ephemeris]
 online = true          # annual JPL Horizons look-up; false never touches the network
@@ -245,8 +250,8 @@ refresh_days = 365.0
 
 Note that `days_per_second = 0` is real time and therefore the only setting
 where what you see is genuinely *now*. Visible motion at that rate comes from
-the slow camera drift (`orbit_speed_deg_per_hour`) and the planets' own
-rotation.
+the camera's slow circuit of the Sun (`rotation_period_minutes`) and the
+planets' own rotation.
 
 A typo is reported rather than silently ignored, because a wallpaper has no
 console to complain to. Run `orrery --windowed` to see the error.
@@ -262,7 +267,7 @@ console to complain to. Run `orrery --windowed` to see the error.
 | `data/` | Star catalogue, constellation figures, deep-sky objects, bundled almanac. See `SOURCES.md`. |
 
 ```sh
-cargo test                                   # 87 tests, mostly astronomy
+cargo test                                   # 99 tests, mostly astronomy
 orrery --screenshot out.png --size 3840x2160 # headless single frame
 ```
 
@@ -289,11 +294,18 @@ obvious the moment a frame was actually rendered:
   triangle strip, but the pipeline used wgpu's default `TriangleList` topology,
   so every other triangle went missing.
 
-Camera framing is solved numerically rather than in closed form. A closed form
-has to approximate the system as a flat disc and ignores perspective
-foreshortening, which overflowed the frame on 32:9 at shallow elevations.
-Measuring the actual projected geometry makes `fill` exact at every aspect
-ratio, portrait included.
+Camera framing is one closed-form expression over one setting: the heliocentric
+radius that lands on the left and right edges of the frame. It replaced an
+iterative search over three interacting knobs.
+
+The obvious closed form — `scale(radius) / tan(fov_x/2)` — is wrong, and wrong
+by 36 %. It places the point sitting *beside* the Sun on the frame edge, which
+is only the answer looking straight down. From a shallow angle the near half of
+an orbit is closer to the camera and projects larger, so the widest part of the
+ellipse sits round towards the viewer. Accounting for that costs one extra
+factor and no iterations, and makes the setting mean exactly what its name says
+at every aspect ratio and tilt — which a test verifies by bisecting on the
+projection rather than by rearranging the formula.
 
 ## Licence
 

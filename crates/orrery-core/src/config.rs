@@ -7,7 +7,6 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::ephemeris::Planet;
 use crate::scale::{BodyScale, RadialScale, ScaleError};
 use crate::time::JulianDate;
 
@@ -114,16 +113,21 @@ pub struct Camera {
     /// Rotation around the ecliptic pole, degrees. Spins the whole system in
     /// the frame.
     pub azimuth_deg: f32,
-    /// Roll about the view axis, degrees. Tilts the horizon.
-    pub roll_deg: f32,
     /// Vertical field of view, degrees.
     pub fov_deg: f32,
-    /// Multiplier on the framing distance. Below 1 crops in, above 1 pulls back.
+    /// Heliocentric radius, in AU, that lands on the left and right edges of the
+    /// frame. This is the whole of the framing: the camera distance follows from
+    /// it in closed form, with no search and so nothing that can quietly settle
+    /// somewhere other than where it was asked to.
     ///
-    /// The framing fits the whole scene inside the frame, which leaves the
-    /// Kuiper belt sitting exactly at the edges. `0.578` crops in by 1.73x so
-    /// the belt runs off the sides instead and the orbits read large.
-    pub zoom: f32,
+    /// The shipped `35.33` sits just outside Neptune's orbit, which is what
+    /// leaves the Kuiper belt running off the sides rather than boxed inside the
+    /// frame. Smaller crops in; larger pulls back.
+    ///
+    /// It replaced `zoom`, `fill` and `fit_width` — three knobs for one
+    /// quantity, which interacted: `fill` was measured before `zoom` was
+    /// applied, so cropping in changed what the solver thought it was fitting.
+    pub frame_radius_au: f32,
     /// Minutes for the camera to travel once around the Sun. Zero holds still.
     ///
     /// This is what makes the constellations legible: the visible patch of sky
@@ -133,21 +137,12 @@ pub struct Camera {
     ///
     /// The orrery turns with it, since the camera really is orbiting.
     pub rotation_period_minutes: f64,
-    /// Fraction of the frame the outermost drawn orbit should span.
-    pub fill: f32,
-    /// Fit the scene to the frame's *width* rather than to whichever axis binds
-    /// first.
-    ///
-    /// On a wide monitor the solar system is much wider than it is tall, so
-    /// fitting both axes leaves it floating in the middle with the width
-    /// unused. Filling the width instead means the vertical extent may not fit,
-    /// and at a shallow tilt it will not: the near arc of the outermost orbit
-    /// runs off the bottom. Place that overflow with `offset_y`, not with
-    /// `elevation_deg`, which is never adjusted to make anything fit.
-    pub fit_width: bool,
     /// Shift the picture within the frame, in fractions of the viewport.
-    /// Positive `offset_y` moves it up, so the shipped `0.27` puts the Sun 23%
-    /// from the top -- chosen so the outermost planet clears the bottom edge.
+    ///
+    /// `offset_y` is measured from the *nearer* edge: it lifts the picture on a
+    /// landscape screen and lowers it on a portrait one, so the shipped `0.27`
+    /// puts the Sun 23% from the top on a wide monitor and 23% from the bottom
+    /// on a tall one. See [`crate::scene`] for why that flip happens at square.
     ///
     /// This is a lens shift: the image moves, the camera does not. It used to
     /// move the camera, which at a shallow tilt dropped it toward the ecliptic
@@ -162,12 +157,9 @@ impl Default for Camera {
         Self {
             elevation_deg: 16.0,
             azimuth_deg: 0.0,
-            roll_deg: 0.0,
             fov_deg: 55.0,
-            zoom: 0.578,
+            frame_radius_au: 35.33,
             rotation_period_minutes: 60.0,
-            fill: 0.94,
-            fit_width: true,
             offset_x: 0.0,
             offset_y: 0.27,
         }
@@ -269,104 +261,65 @@ pub struct Scale {
     pub body: BodyScale,
 }
 
-/// The starfield and nebulae behind the orrery. All procedural — no assets.
+/// The sky behind the orrery: 8,404 catalogued stars at their true positions,
+/// over a procedural haze that supplies the sub-naked-eye background.
+///
+/// Nine further fields lived here — the generator seed, star density, nebula
+/// and ambient levels, a sky rotation, a magnitude cut-off, and switches for the
+/// real stars and the constellations. They were tuning that has settled, and
+/// they are now constants in [`orrery_render`] at the point each is used.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Sky {
-    /// Changes the entire generated sky. Any value is as valid as any other.
-    pub seed: u32,
-    /// Relative number of stars.
-    pub star_density: f32,
     /// Overall star brightness.
     pub star_brightness: f32,
-    /// Intensity of the galactic band.
+    /// Intensity of the galactic band. Placed from the real IAU galactic pole,
+    /// so it crosses the solar system at its true 60° to the ecliptic.
     pub milky_way: f32,
-    /// Intensity of the coloured nebulosity.
-    pub nebula: f32,
-    /// Lifts the darkest parts of the sky off pure black.
-    pub ambient: f32,
-    /// Degrees to rotate the generated sky about the ecliptic pole.
-    pub rotation_deg: f32,
-
-    /// Draw the real catalogued stars at their true positions.
-    ///
-    /// With this off the sky is entirely procedural: still pretty, but the
-    /// constellations are not there to be found.
-    pub real_stars: bool,
-    /// Faintest catalogued star to draw. The catalogue runs to 6.5, which is
-    /// roughly the naked-eye limit under a dark sky.
-    pub magnitude_limit: f32,
-    /// Draw constellation figures.
-    pub constellations: bool,
-    /// How strongly to draw them. Deliberately very low by default: the lines
-    /// are meant to be found by someone looking for them, not to be a diagram.
+    /// How strongly the constellation figures are drawn. Deliberately very low:
+    /// the lines are meant to be found by someone looking for them, not to turn
+    /// the desktop into a star chart. Raise toward 0.5 to actually study them.
     pub constellation_opacity: f32,
-    /// Fraction of a figure's stars that must lie behind the Sun before it is
-    /// drawn. The viewpoint looks down at the Sun from outside, so the far side
-    /// of it is the middle of the picture.
-    pub constellation_min_behind_sun: f32,
 }
 
 impl Default for Sky {
     fn default() -> Self {
         Self {
-            seed: 0x0B17_5EED,
-            star_density: 1.0,
             star_brightness: 1.0,
             milky_way: 0.40,
-            nebula: 0.35,
-            ambient: 0.018,
-            rotation_deg: 0.0,
-            real_stars: true,
-            magnitude_limit: 6.5,
-            constellations: true,
             constellation_opacity: 0.10,
-            constellation_min_behind_sun: 0.8,
         }
     }
 }
 
 /// The drawn orbit rings.
+///
+/// Line width, the trail that brightens the ring behind each planet, and the
+/// segment count are constants now — see [`orrery_render`] and
+/// [`crate::scene`]. How *visible* the rings are is the one thing worth a knob.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Orbits {
-    pub enabled: bool,
-    /// Line width in physical pixels.
-    pub width_px: f32,
+    /// `0` hides the rings entirely and leaves the planets on the bare sky.
     pub opacity: f32,
-    /// How much brighter the ring is just behind each planet, giving a sense of
-    /// travel direction. `0` draws a uniform ring.
-    pub trail_strength: f32,
-    /// Fraction of the orbit the trail spans.
-    pub trail_length: f32,
-    /// Segments per ring. Higher is smoother; 512 is already sub-pixel at 4K.
-    pub segments: u32,
 }
 
 impl Default for Orbits {
     fn default() -> Self {
-        Self {
-            enabled: true,
-            width_px: 1.4,
-            opacity: 0.34,
-            trail_strength: 2.2,
-            trail_length: 0.22,
-            segments: 512,
-        }
+        Self { opacity: 0.34 }
     }
 }
 
 /// Renderer and output settings.
+///
+/// Multisampling, exposure and bloom strength are fixed in [`orrery_render`]:
+/// they are part of the look, not preferences, and the look is what the
+/// composition was signed off against.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Render {
     /// Frame rate cap. A wallpaper has no business running at 240 Hz.
     pub fps: u32,
-    /// Multisample count: 1, 2, 4 or 8.
-    pub msaa: u32,
-    /// Exposure applied before tone mapping, in stops.
-    pub exposure_stops: f32,
-    pub bloom_intensity: f32,
     pub vsync: bool,
 }
 
@@ -374,69 +327,38 @@ impl Default for Render {
     fn default() -> Self {
         Self {
             fps: 30,
-            msaa: 4,
-            exposure_stops: 0.0,
-            bloom_intensity: 0.09,
             vsync: true,
         }
     }
 }
 
-/// Which bodies to draw.
+/// The optional company the planets keep.
+///
+/// Which planets are drawn is no longer configurable: it is the eight, always,
+/// in [`crate::scene::DRAWN_PLANETS`]. A list you could edit invited a scene
+/// with two planets in it, which every framing decision in this project assumes
+/// away. These three are genuine taste — some people want the belts, some find
+/// them noise.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Bodies {
-    /// Planet names, case-insensitive. Order is irrelevant.
-    pub show: Vec<String>,
-    /// Draw the Moon around Earth. Its orbit is exaggerated to stay visible.
+    /// Draw the Moon around Earth. Its separation is exaggerated to stay
+    /// visible, though its direction is the real one.
     pub moon: bool,
-    /// How far to push the Moon from Earth, as a multiple of the true
-    /// separation under the current scale. The Moon is 60 Earth radii out,
-    /// which compresses to nothing.
-    pub moon_distance_boost: f32,
     /// Draw the asteroid belt between Mars and Jupiter.
     pub asteroid_belt: bool,
-    /// Draw the Kuiper belt beyond Neptune. This is the outermost thing in the
-    /// scene, so switching it on pulls the camera back and shrinks everything
-    /// else.
+    /// Draw the Kuiper belt beyond Neptune. It deliberately runs off the sides
+    /// of the frame rather than being contained by it.
     pub kuiper_belt: bool,
-    /// Particles in the asteroid belt. The Kuiper belt gets 1.6x this, being
-    /// both wider and more populous.
-    pub belt_particles: u32,
 }
 
 impl Default for Bodies {
     fn default() -> Self {
         Self {
-            // Pluto omitted by default: it is not a planet, and its 17°
-            // inclination sits it awkwardly outside the plane of the others.
-            show: Planet::ALL
-                .iter()
-                .filter(|p| **p != Planet::Pluto)
-                .map(|p| p.name().to_owned())
-                .collect(),
             moon: true,
-            moon_distance_boost: 3.5,
             asteroid_belt: true,
             kuiper_belt: true,
-            belt_particles: 6000,
         }
-    }
-}
-
-impl Bodies {
-    /// Resolve [`Bodies::show`] into planets, rejecting unknown names.
-    pub fn resolve(&self) -> Result<Vec<Planet>, ConfigError> {
-        let mut resolved = Vec::with_capacity(self.show.len());
-        for name in &self.show {
-            let planet = Planet::from_name(name)
-                .ok_or_else(|| ConfigError::UnknownBody(name.clone()))?;
-            if !resolved.contains(&planet) {
-                resolved.push(planet);
-            }
-        }
-        resolved.sort();
-        Ok(resolved)
     }
 }
 
@@ -453,7 +375,6 @@ impl Config {
     pub fn validate(&self) -> Result<(), ConfigError> {
         self.scale.orbit.validate()?;
         self.scale.body.validate()?;
-        self.bodies.resolve()?;
         self.time.start_epoch()?;
 
         if !(1.0..=179.0).contains(&self.camera.fov_deg) {
@@ -462,14 +383,11 @@ impl Config {
         if !(-90.0..=90.0).contains(&self.camera.elevation_deg) {
             return Err(ConfigError::Range("camera.elevation_deg", "-90 to 90"));
         }
-        if self.camera.zoom <= 0.0 || !self.camera.zoom.is_finite() {
-            return Err(ConfigError::Range("camera.zoom", "greater than 0"));
+        if !(self.camera.frame_radius_au.is_finite() && self.camera.frame_radius_au > 0.0) {
+            return Err(ConfigError::Range("camera.frame_radius_au", "greater than 0"));
         }
-        if !matches!(self.render.msaa, 1 | 2 | 4 | 8) {
-            return Err(ConfigError::Range("render.msaa", "1, 2, 4 or 8"));
-        }
-        if self.orbits.segments < 16 {
-            return Err(ConfigError::Range("orbits.segments", "at least 16"));
+        if !(0.0..=1.0).contains(&self.orbits.opacity) {
+            return Err(ConfigError::Range("orbits.opacity", "0.0 to 1.0"));
         }
         if !(0.0..=1.0).contains(&self.lighting.night_brightness) {
             return Err(ConfigError::Range("lighting.night_brightness", "0.0 to 1.0"));
@@ -483,14 +401,8 @@ impl Config {
         if !(0.0..=100.0).contains(&self.lighting.sun_intensity) {
             return Err(ConfigError::Range("lighting.sun_intensity", "0.0 to 100.0"));
         }
-        if !(0.0..=1.0).contains(&self.sky.constellation_min_behind_sun) {
-            return Err(ConfigError::Range("sky.constellation_min_behind_sun", "0.0 to 1.0"));
-        }
         if !(0.0..=10_080.0).contains(&self.camera.rotation_period_minutes) {
             return Err(ConfigError::Range("camera.rotation_period_minutes", "0 to 10080"));
-        }
-        if !(-2.0..=6.5).contains(&self.sky.magnitude_limit) {
-            return Err(ConfigError::Range("sky.magnitude_limit", "-2.0 to 6.5"));
         }
         if !(1.0..=3650.0).contains(&self.ephemeris.refresh_days) {
             return Err(ConfigError::Range("ephemeris.refresh_days", "1 to 3650"));
@@ -505,8 +417,6 @@ pub enum ConfigError {
     Toml(#[from] toml::de::Error),
     #[error("invalid scale: {0}")]
     Scale(#[from] ScaleError),
-    #[error("unknown body {0:?}; expected one of Mercury..Pluto")]
-    UnknownBody(String),
     #[error("could not parse date {0:?}; expected YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS")]
     Date(String),
     #[error("{0} must be {1}")]
@@ -542,20 +452,32 @@ mod tests {
         assert!(matches!(err, ConfigError::Toml(_)), "{err}");
     }
 
+    /// A field that was removed must be reported by name, not ignored. This is
+    /// how `install.sh` detects a config from an older version: it runs
+    /// `--check-config`, and on failure moves the file aside with the offending
+    /// key quoted back to the user.
     #[test]
-    fn unknown_body_is_rejected() {
-        let err = Config::from_toml("[bodies]\nshow = [\"Vulcan\"]\n").unwrap_err();
-        assert!(matches!(err, ConfigError::UnknownBody(name) if name == "Vulcan"));
-    }
-
-    #[test]
-    fn body_names_are_case_insensitive_and_deduplicated() {
-        let config =
-            Config::from_toml("[bodies]\nshow = [\"mars\", \"MARS\", \"Earth\"]\n").unwrap();
-        assert_eq!(
-            config.bodies.resolve().unwrap(),
-            vec![Planet::Earth, Planet::Mars]
-        );
+    fn fields_removed_in_the_prune_are_rejected_by_name() {
+        for (section, key) in [
+            ("camera", "zoom = 0.578"),
+            ("camera", "fill = 0.94"),
+            ("camera", "fit_width = true"),
+            ("camera", "roll_deg = 0.0"),
+            ("sky", "seed = 186081005"),
+            ("sky", "magnitude_limit = 6.5"),
+            ("orbits", "segments = 512"),
+            ("render", "msaa = 4"),
+            ("bodies", "show = [\"Mars\"]"),
+            ("bodies", "belt_particles = 6000"),
+        ] {
+            let text = format!("[{section}]\n{key}\n");
+            let err = Config::from_toml(&text).unwrap_err();
+            let name = key.split(' ').next().unwrap();
+            assert!(
+                matches!(&err, ConfigError::Toml(e) if e.to_string().contains(name)),
+                "removed key {name} was not reported by name: {err}"
+            );
+        }
     }
 
     #[test]
@@ -584,9 +506,8 @@ mod tests {
         for bad in [
             "[camera]\nfov_deg = 0.0\n",
             "[camera]\nelevation_deg = 120.0\n",
-            "[camera]\nzoom = 0.0\n",
-            "[render]\nmsaa = 3\n",
-            "[orbits]\nsegments = 4\n",
+            "[camera]\nframe_radius_au = 0.0\n",
+            "[orbits]\nopacity = 1.5\n",
             "[scale.orbit]\nlaw = \"power\"\nunits_per_au = 1.0\nexponent = -1.0\n",
         ] {
             assert!(Config::from_toml(bad).is_err(), "accepted {bad:?}");

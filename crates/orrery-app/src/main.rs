@@ -217,12 +217,9 @@ fn refresh_ephemeris_now(destination: Option<PathBuf>) -> Result<()> {
 const BUNDLED_ALMANAC: &str = include_str!("../../../data/almanac.toml");
 
 /// Hand the star catalogue to the renderer, tolerating a broken one.
-fn load_catalog_into(renderer: &mut Renderer, device: &wgpu::Device, config: &Config) {
-    if !config.sky.real_stars && !config.sky.constellations {
-        return;
-    }
+fn load_catalog_into(renderer: &mut Renderer, device: &wgpu::Device) {
     match orrery_core::sky::Catalog::embedded() {
-        Ok(catalog) => renderer.set_catalog(device, &catalog, config),
+        Ok(catalog) => renderer.set_catalog(device, &catalog),
         // The procedural sky still works, so this is not fatal.
         Err(error) => log::warn!("could not load the star catalogue: {error}"),
     }
@@ -595,8 +592,8 @@ impl App {
         };
         surface.configure(&device, &surface_config);
 
-        let mut renderer = Renderer::new(&device, format, width, height, &self.config);
-        load_catalog_into(&mut renderer, &device, &self.config);
+        let mut renderer = Renderer::new(&device, format, width, height);
+        load_catalog_into(&mut renderer, &device);
 
         Ok(Graphics {
             window,

@@ -5,23 +5,29 @@
 # silently ignored, because a wallpaper has no console to complain to.
 #
 # The renderer re-reads this file whenever it is saved.
+#
+# This used to carry 49 settings. Most were added to debug something and never
+# taken out, and every one of them was another value to hold fixed when
+# comparing two renders. What is left is what a person might plausibly want
+# different; the rest are constants in the code, at the place each is used.
 
 [camera]
 # Angle above the ecliptic plane. 90 looks straight down on the solar system,
 # 0 is edge-on. The default is the oblique three-quarter view that makes the
-# orbits read as ellipses rather than circles.
+# orbits read as ellipses rather than circles. It is honoured exactly -- nothing
+# adjusts it to make anything fit.
 elevation_deg = 16.0
 # Rotation about the ecliptic pole: spins the whole system within the frame.
 azimuth_deg = 0.0
-# Roll about the view axis: tilts the horizon.
-roll_deg = 0.0
 fov_deg = 55.0
-# Multiplier on the framing distance. Below 1 crops in, above 1 pulls back.
+# Heliocentric radius, in AU, that lands on the left and right edges of the
+# frame. This is the whole of the framing -- the camera distance follows from it
+# directly, with no search behind it.
 #
-# The framing fits the whole scene inside the frame, which leaves the Kuiper
-# belt sitting exactly at the edges. 0.578 crops in by 1.73x so the belt runs
-# off the sides instead and the orbits read large.
-zoom = 0.578
+# 35.33 sits just outside Neptune's orbit at 30 AU, which is what leaves the
+# Kuiper belt running off the sides rather than boxed inside the frame. Smaller
+# crops in; larger pulls back.
+frame_radius_au = 35.33
 # Minutes for the camera to travel once around the Sun. Zero holds still.
 #
 # This is what makes the constellations legible: the patch of sky in view sits
@@ -31,29 +37,15 @@ zoom = 0.578
 # orbiting.
 rotation_period_minutes = 60.0
 
-# Fraction of the frame the outermost drawn thing spans. Honoured exactly, at
-# every aspect ratio.
-fill = 0.94
-# Fit to the frame's *width* rather than to whichever axis binds first.
-#
-# On a wide monitor the solar system is far wider than it is tall, so fitting
-# both axes leaves it floating with the width unused. Filling the width means
-# the vertical extent must fit too -- and that is a function of the tilt: a ring
-# spanning the full width projects to about `fill * aspect * sin(elevation)` of
-# the half-height, so on a wide screen a steep tilt pushes the near arc of the
-# outermost orbit off the bottom edge. That is allowed and intended:
-# `elevation_deg` is honoured exactly and is never adjusted to make things fit.
-fit_width = true
 # Shift the picture within the frame, in fractions of the viewport. This is a
 # lens shift: the image moves, the camera does not, so the tilt and the size of
-# the system are untouched. Positive `offset_y` moves the picture up.
+# the system are untouched.
 #
-# 0.27 puts the Sun 23% from the top. That is not arbitrary -- at a shallow tilt
-# the near arc of the outermost orbit hangs below the frame, and raising the
-# picture this far brings it back inside with the outermost planet clearing the
-# bottom edge by 16 pixels at 1440p. Neptune currently sits almost exactly at
-# the low point of its own orbit, so this is the worst case: no planet clips at
-# the bottom at any date.
+# offset_y is measured from the *nearer* edge -- it lifts the picture on a
+# landscape screen and lowers it on a portrait one. So 0.27 puts the Sun 23%
+# from the top on a wide monitor, and 23% from the bottom on a tall one, where
+# the system is small and hanging it from the top edge leaves the lower half
+# empty. See docs/TARGET-COMPOSITION.md for why the flip happens at square.
 offset_x = 0.0
 offset_y = 0.27
 
@@ -78,7 +70,7 @@ days_per_second = 0.0
 # rescaled, never the direction, so every planet's heliocentric longitude and
 # latitude -- and so every conjunction and alignment -- stays exact.
 #
-#   law = "linear"       true to scale; needs `zoom` to frame the inner system
+#   law = "linear"       true to scale; frame it with `frame_radius_au`
 #   law = "power"        r^exponent; the classic orrery compression
 #   law = "logarithmic"  more aggressive in the outer system
 #
@@ -104,55 +96,25 @@ exponent = 0.4
 sun_multiplier = 0.85
 
 [sky]
-# Change this for an entirely different sky. Any value is as good as any other.
-seed = 186081005
-star_density = 1.0
+# 8,404 catalogued stars to magnitude 6.5 -- the whole naked-eye sky -- at their
+# true positions, with real magnitudes and colours from their B-V index, over a
+# procedural haze that supplies the fainter background. See data/SOURCES.md.
 star_brightness = 1.0
 # The galactic band is placed using the real IAU galactic pole, so it crosses
 # the solar system at its true angle of roughly 60 degrees to the ecliptic.
 milky_way = 0.40
-nebula = 0.35
-# Lifts the darkest sky off pure black. Planet night sides are handled
-# separately, under [lighting].
-ambient = 0.018
-rotation_deg = 0.0
-
-# The real sky. 8,404 catalogued stars to magnitude 6.5 -- the whole naked-eye
-# sky -- at their true positions, with real magnitudes and colours from their
-# B-V index. See data/SOURCES.md for provenance and licensing.
-real_stars = true
-magnitude_limit = 6.5
-
 # Constellation figures for the 20 major constellations. Deliberately drawn
 # very faint: they are meant to be found by someone looking for them, not to
 # turn the wallpaper into a star chart. Raise toward 0.5 to actually study them.
-constellations = true
 constellation_opacity = 0.10
-# Fraction of a figure's stars that must lie behind the Sun before it is drawn.
-# The viewpoint looks down at the Sun from outside, so the far side of it is the
-# middle of the picture. There is deliberately no "must fit on screen" rule:
-# almost every constellation is larger than the visible band, so demanding whole
-# figures meant nothing was ever drawn.
-constellation_min_behind_sun = 0.8
-
 
 [orbits]
-enabled = true
-width_px = 1.4
+# 0 hides the rings entirely and leaves the planets on the bare sky.
 opacity = 0.34
-# How much brighter the ring is just behind each planet, which gives a sense of
-# which way it is travelling. 0 draws a uniform ring.
-trail_strength = 2.2
-trail_length = 0.22
-segments = 512
 
 [render]
 # A wallpaper has no business running at the display's refresh rate.
 fps = 30
-# 1, 2, 4 or 8.
-msaa = 4
-exposure_stops = 0.0
-bloom_intensity = 0.09
 vsync = true
 
 [ephemeris]
@@ -201,17 +163,12 @@ day_saturation = 1.35
 sun_intensity = 6.0
 
 [bodies]
-# Case-insensitive. Pluto is off by default: it is not a planet, and its 17
-# degree inclination sits it awkwardly outside the plane of the others.
-show = ["Mercury", "Venus", "Earth", "Mars", "Jupiter", "Saturn", "Uranus", "Neptune"]
+# The eight planets are always drawn. Pluto is not one, and its 17 degree
+# inclination sits it awkwardly outside the plane of the others.
+#
+# These three are taste: some people want the debris, some find it noise.
 moon = true
-# The Moon's true separation collapses to nothing under any useful compression,
-# so it is pushed out to stay visible. Its *direction* from Earth is still the
-# real one, so the phase and the side it sits on read correctly.
-moon_distance_boost = 3.5
 asteroid_belt = true
-# The Kuiper belt, beyond Neptune. This is the outermost thing in the scene, so
-# switching it on pulls the camera back and shrinks everything else.
+# The Kuiper belt, beyond Neptune. It deliberately runs off the sides of the
+# frame rather than being contained by it.
 kuiper_belt = true
-# Particles in the asteroid belt; the Kuiper belt gets 1.6x, being wider.
-belt_particles = 6000
