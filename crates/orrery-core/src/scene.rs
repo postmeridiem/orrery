@@ -16,7 +16,7 @@
 //! which is a rotation, not a reflection — so the planets still orbit
 //! anticlockwise seen from the north, as they do in reality.
 
-use glam::{DVec3, Mat4, Quat, Vec3};
+use glam::{DVec3, Mat4, Quat, Vec2, Vec3};
 
 use crate::bodies::{self, BodyData, Rings};
 use crate::config::Config;
@@ -157,6 +157,15 @@ pub struct CameraState {
     pub fov_y_radians: f32,
     pub near: f32,
     pub far: f32,
+    /// Lens shift, in normalised device coordinates: how far the image sits
+    /// from centre once projected. `(0.0, 0.2)` lifts everything a tenth of
+    /// the screen height, putting the Sun two fifths from the top.
+    ///
+    /// This is a shift of the *image*, not of the camera. Moving the camera
+    /// instead -- which is what the old `offset_y` did -- changes the angle the
+    /// ecliptic is seen at, and at a shallow tilt that makes the near arc of
+    /// the outer orbit diverge violently rather than simply sliding down.
+    pub lens_shift: Vec2,
 }
 
 impl CameraState {
@@ -168,11 +177,23 @@ impl CameraState {
     /// across the enormous near/far ratio an orrery spans; the renderer pairs
     /// it with a `GreaterEqual` depth test and a clear value of 0.
     pub fn projection(&self, aspect: f32) -> Mat4 {
-        glam::camera::rh::proj::directx::perspective_infinite_reverse(
+        let projection = glam::camera::rh::proj::directx::perspective_infinite_reverse(
             self.fov_y_radians,
             aspect,
             self.near,
-        )
+        );
+
+        if self.lens_shift == Vec2::ZERO {
+            return projection;
+        }
+
+        // Shear in clip space: `y += shift.y * w`, so after the perspective
+        // divide every point lands `shift.y` further up the screen. Depth is
+        // untouched, which keeps the reversed-Z arrangement intact.
+        let mut shift = Mat4::IDENTITY;
+        shift.w_axis.x = self.lens_shift.x;
+        shift.w_axis.y = self.lens_shift.y;
+        shift * projection
     }
 
     pub fn view_projection(&self, aspect: f32) -> Mat4 {
@@ -446,7 +467,14 @@ fn frame_camera(config: &Config, points: &[Vec3], extent: f32, aspect: f32) -> C
     // got -- the picture ended up at whichever step the loop stopped on, that
     // step moved as the camera orbited, and cropping in changed it again. The
     // distance adapts to fit the frame; the tilt is the user's to set.
-    solve_at_elevation(config, points, extent, aspect, camera.elevation_deg, fill).0
+    let mut solved = solve_at_elevation(config, points, extent, aspect, camera.elevation_deg, fill).0;
+
+    // Applied *after* the solve, deliberately. Shifting during it would let the
+    // solver pull back to compensate, shrinking the system -- so asking to move
+    // the picture would silently also resize it. Offsets are fractions of the
+    // full viewport; normalised device coordinates span two of those per axis.
+    solved.lens_shift = Vec2::new(camera.offset_x * 2.0, camera.offset_y * 2.0);
+    solved
 }
 
 /// Place the camera at a given elevation and solve its distance.
@@ -479,7 +507,7 @@ fn solve_at_elevation(
     let forward = -direction;
     let right = forward.cross(Vec3::Y).normalize_or(Vec3::X);
     let up = right.cross(forward).normalize_or(Vec3::Y);
-    let target = right * (camera.offset_x * extent) + up * (camera.offset_y * extent);
+    let target = Vec3::ZERO;
     let roll = Quat::from_axis_angle(forward, camera.roll_deg.to_radians());
 
     let minimum_distance = extent * 1.05;
@@ -490,6 +518,7 @@ fn solve_at_elevation(
         fov_y_radians: fov_y,
         near: (distance * 0.001).max(1e-4),
         far: distance * 10.0,
+        lens_shift: Vec2::ZERO,
     };
 
     /// Widest the geometry reaches on each axis, or `None` if any is behind.
@@ -693,9 +722,11 @@ mod tests {
                 let mut config = Config::default();
                 config.camera.elevation_deg = elevation;
                 // This tests the *framing*, which promises the scene fits. Zoom
-                // is applied on top of that and crops in deliberately, so it is
-                // held at 1 here.
+                // and the lens shift are both applied on top of that and crop
+                // in deliberately, so they are neutralised here.
                 config.camera.zoom = 1.0;
+                config.camera.offset_x = 0.0;
+                config.camera.offset_y = 0.0;
                 let scene = Scene::build(&config, &Lookup::builtin(), EPOCH, aspect);
                 let view_projection = scene.camera.view_projection(aspect);
 
@@ -806,27 +837,42 @@ mod tests {
         let mut config = Config::default();
         config.camera.elevation_deg = 16.0;
         config.camera.zoom = 0.578;
+        config.camera.offset_y = 0.27;
         config.camera.rotation_period_minutes = 0.0;
 
         let scene = Scene::build(&config, &Lookup::builtin(), EPOCH, ASPECT);
         let view_projection = scene.camera.view_projection(ASPECT);
+        let ndc_of = |point: Vec3| {
+            let clip = view_projection * point.extend(1.0);
+            (clip.w > 0.0).then(|| clip.truncate() / clip.w)
+        };
+
+        let sun_y = ndc_of(Vec3::ZERO).expect("the Sun in front of the camera").y;
 
         let outermost = scene.orbits.last().expect("an outermost orbit");
         let (mut visible_half_width, mut far_edge, mut near_arc) = (0.0f32, 0.0f32, 0.0f32);
         for point in &outermost.points {
-            let clip = view_projection * point.extend(1.0);
-            if clip.w <= 0.0 {
-                continue;
-            }
-            let ndc = clip.truncate() / clip.w;
+            let Some(ndc) = ndc_of(*point) else { continue };
             if ndc.y.abs() <= 1.0 {
                 visible_half_width = visible_half_width.max(ndc.x.abs());
             }
-            if ndc.y < 0.0 {
+            if ndc.y < sun_y {
                 near_arc = near_arc.max(-ndc.y);
             } else {
                 far_edge = far_edge.max(ndc.y);
             }
+        }
+
+        // The lowest edge of the lowest planet, not just of its orbit. The
+        // orbit line can clear the frame while the planet riding on it is
+        // sliced flat -- which is exactly what the naked eye reads as a
+        // deliberate crop, and what the orbit measurements above all missed.
+        let half_fov = (scene.camera.fov_y_radians * 0.5).tan();
+        let mut lowest_body = f32::MAX;
+        for body in &scene.bodies {
+            let Some(ndc) = ndc_of(body.position) else { continue };
+            let radius = body.radius / (body.position.distance(scene.camera.eye) * half_fov);
+            lowest_body = lowest_body.min(ndc.y - radius);
         }
 
         let close = |actual: f32, target: f32, tolerance: f32, what: &str| {
@@ -835,14 +881,23 @@ mod tests {
                 "{what}: {actual:.3}, target {target:.3} +/- {tolerance}"
             );
         };
+        close((1.0 - sun_y) / 2.0, 0.230, 0.003, "Sun's distance from the top");
         close(visible_half_width, 0.851, 0.02, "visible half-width");
-        close(far_edge, 0.250, 0.02, "far edge above centre");
-        close(near_arc, 1.442, 0.05, "near arc below the bottom edge");
+        close(far_edge, 0.790, 0.02, "far edge above centre");
+        close(near_arc, 0.902, 0.02, "near arc below centre");
         close(
             scene.camera.eye.distance(scene.camera.target),
             6.2334,
             0.01,
             "camera distance",
+        );
+
+        // Half the frame height is 720 px at 1440p, so this is a pixel count.
+        let clearance_px = (lowest_body + 1.0) * 720.0;
+        assert!(
+            clearance_px >= 12.0,
+            "the lowest planet clears the bottom edge by {clearance_px:.1}px, \
+             wanted at least 12px -- at or below zero it is being clipped"
         );
     }
 

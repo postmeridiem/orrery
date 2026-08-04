@@ -19,8 +19,8 @@ fov_deg = 55.0
 # Multiplier on the framing distance. Below 1 crops in, above 1 pulls back.
 #
 # The framing fits the whole scene inside the frame, which leaves the Kuiper
-# belt sitting exactly at the edges. 0.785 crops in by 1.274x so the belt runs
-# off the sides instead.
+# belt sitting exactly at the edges. 0.578 crops in by 1.73x so the belt runs
+# off the sides instead and the orbits read large.
 zoom = 0.578
 # Minutes for the camera to travel once around the Sun. Zero holds still.
 #
@@ -53,10 +53,18 @@ fill = 0.94
 # outermost orbit off the bottom edge. That is allowed and intended:
 # `elevation_deg` is honoured exactly and is never adjusted to make things fit.
 fit_width = true
-# Shift the system within the frame, in fractions of the viewport. Handy for
-# keeping the Sun out from behind a column of desktop icons.
+# Shift the picture within the frame, in fractions of the viewport. This is a
+# lens shift: the image moves, the camera does not, so the tilt and the size of
+# the system are untouched. Positive `offset_y` moves the picture up.
+#
+# 0.27 puts the Sun 23% from the top. That is not arbitrary -- at a shallow tilt
+# the near arc of the outermost orbit hangs below the frame, and raising the
+# picture this far brings it back inside with the outermost planet clearing the
+# bottom edge by 16 pixels at 1440p. Neptune currently sits almost exactly at
+# the low point of its own orbit, so this is the worst case: no planet clips at
+# the bottom at any date.
 offset_x = 0.0
-offset_y = 0.0
+offset_y = 0.27
 
 [time]
 # "live" tracks the clock; "fixed" freezes at `date`.

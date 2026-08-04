@@ -121,8 +121,8 @@ pub struct Camera {
     /// Multiplier on the framing distance. Below 1 crops in, above 1 pulls back.
     ///
     /// The framing fits the whole scene inside the frame, which leaves the
-    /// Kuiper belt sitting exactly at the edges. `0.785` crops in by 1.274x so
-    /// the belt runs off the sides instead.
+    /// Kuiper belt sitting exactly at the edges. `0.578` crops in by 1.73x so
+    /// the belt runs off the sides instead and the orbits read large.
     pub zoom: f32,
     /// Minutes for the camera to travel once around the Sun. Zero holds still.
     ///
@@ -150,13 +150,19 @@ pub struct Camera {
     ///
     /// On a wide monitor the solar system is much wider than it is tall, so
     /// fitting both axes leaves it floating in the middle with the width
-    /// unused. Filling the width instead means the vertical extent has to fit
-    /// too, which is what `elevation_deg` controls -- and on an ultrawide the
-    /// elevation genuinely has to come down, so this lowers it automatically
-    /// rather than letting the scene overflow.
+    /// unused. Filling the width instead means the vertical extent may not fit,
+    /// and at a shallow tilt it will not: the near arc of the outermost orbit
+    /// runs off the bottom. Place that overflow with `offset_y`, not with
+    /// `elevation_deg`, which is never adjusted to make anything fit.
     pub fit_width: bool,
-    /// Offset of the system's centre within the frame, in fractions of the
-    /// viewport. Useful for keeping the Sun clear of desktop icons.
+    /// Shift the picture within the frame, in fractions of the viewport.
+    /// Positive `offset_y` moves it up, so the shipped `0.27` puts the Sun 23%
+    /// from the top -- chosen so the outermost planet clears the bottom edge.
+    ///
+    /// This is a lens shift: the image moves, the camera does not. It used to
+    /// move the camera, which at a shallow tilt dropped it toward the ecliptic
+    /// and made the outer orbit diverge rather than simply slide -- so asking
+    /// for a nudge also resized the whole system.
     pub offset_x: f32,
     pub offset_y: f32,
 }
@@ -175,7 +181,7 @@ impl Default for Camera {
             fill: 0.94,
             fit_width: true,
             offset_x: 0.0,
-            offset_y: 0.0,
+            offset_y: 0.27,
         }
     }
 }
