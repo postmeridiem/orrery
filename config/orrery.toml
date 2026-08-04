@@ -31,15 +31,6 @@ zoom = 0.578
 # orbiting.
 rotation_period_minutes = 60.0
 
-# Days for the viewpoint to rise above the ecliptic and sink below it again,
-# and how far it travels. Zero holds the elevation fixed.
-#
-# A fixed elevation only ever sees one band of sky, and from above the plane
-# that band is southern -- the northern constellations can never appear at all.
-# Letting the viewpoint drift below the plane and back brings the rest of the
-# sky into reach, slowly. Try elevation_cycle_days = 7.0.
-elevation_cycle_days = 0.0
-elevation_cycle_deg = 40.0
 # Fraction of the frame the outermost drawn thing spans. Honoured exactly, at
 # every aspect ratio.
 fill = 0.94

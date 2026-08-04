@@ -133,16 +133,6 @@ pub struct Camera {
     ///
     /// The orrery turns with it, since the camera really is orbiting.
     pub rotation_period_minutes: f64,
-    /// Days for the camera to rise above the ecliptic and sink below it again.
-    /// Zero holds the elevation fixed.
-    ///
-    /// A fixed elevation only ever sees one band of sky -- from above the plane
-    /// that band is southern, so the northern constellations can never appear.
-    /// Letting the viewpoint drift below the plane and back brings the rest of
-    /// the sky into reach, slowly.
-    pub elevation_cycle_days: f64,
-    /// How far above and below `elevation_deg` that cycle travels, in degrees.
-    pub elevation_cycle_deg: f32,
     /// Fraction of the frame the outermost drawn orbit should span.
     pub fill: f32,
     /// Fit the scene to the frame's *width* rather than to whichever axis binds
@@ -176,8 +166,6 @@ impl Default for Camera {
             fov_deg: 55.0,
             zoom: 0.578,
             rotation_period_minutes: 60.0,
-            elevation_cycle_days: 0.0,
-            elevation_cycle_deg: 40.0,
             fill: 0.94,
             fit_width: true,
             offset_x: 0.0,
@@ -500,12 +488,6 @@ impl Config {
         }
         if !(0.0..=10_080.0).contains(&self.camera.rotation_period_minutes) {
             return Err(ConfigError::Range("camera.rotation_period_minutes", "0 to 10080"));
-        }
-        if !(0.0..=3650.0).contains(&self.camera.elevation_cycle_days) {
-            return Err(ConfigError::Range("camera.elevation_cycle_days", "0 to 3650"));
-        }
-        if !(0.0..=90.0).contains(&self.camera.elevation_cycle_deg) {
-            return Err(ConfigError::Range("camera.elevation_cycle_deg", "0 to 90"));
         }
         if !(-2.0..=6.5).contains(&self.sky.magnitude_limit) {
             return Err(ConfigError::Range("sky.magnitude_limit", "-2.0 to 6.5"));

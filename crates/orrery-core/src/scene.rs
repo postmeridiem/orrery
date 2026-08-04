@@ -494,32 +494,45 @@ fn solve_at_elevation(
 
     let camera = &config.camera;
     let elevation = elevation_deg.to_radians();
-    let azimuth = camera.azimuth_deg.to_radians();
     let fov_y = camera.fov_deg.to_radians();
-
-    let direction = Vec3::new(
-        elevation.cos() * azimuth.cos(),
-        elevation.sin(),
-        elevation.cos() * azimuth.sin(),
-    )
-    .normalize_or(Vec3::Y);
-
-    let forward = -direction;
-    let right = forward.cross(Vec3::Y).normalize_or(Vec3::X);
-    let up = right.cross(forward).normalize_or(Vec3::Y);
     let target = Vec3::ZERO;
-    let roll = Quat::from_axis_angle(forward, camera.roll_deg.to_radians());
 
-    let minimum_distance = extent * 1.05;
-    let at_distance = |distance: f32| CameraState {
-        eye: target + direction * distance,
-        target,
-        up: roll * up,
-        fov_y_radians: fov_y,
-        near: (distance * 0.001).max(1e-4),
-        far: distance * 10.0,
-        lens_shift: Vec2::ZERO,
+    let place = |azimuth_deg: f32, distance: f32| {
+        let azimuth = azimuth_deg.to_radians();
+        let direction = Vec3::new(
+            elevation.cos() * azimuth.cos(),
+            elevation.sin(),
+            elevation.cos() * azimuth.sin(),
+        )
+        .normalize_or(Vec3::Y);
+        let forward = -direction;
+        let right = forward.cross(Vec3::Y).normalize_or(Vec3::X);
+        let up = right.cross(forward).normalize_or(Vec3::Y);
+        CameraState {
+            eye: target + direction * distance,
+            target,
+            up: Quat::from_axis_angle(forward, camera.roll_deg.to_radians()) * up,
+            fov_y_radians: fov_y,
+            near: (distance * 0.001).max(1e-4),
+            far: distance * 10.0,
+            lens_shift: Vec2::ZERO,
+        }
     };
+
+    // The distance is solved at azimuth 0 and then reused at whatever azimuth is
+    // configured. It must not be re-solved as the camera goes round.
+    //
+    // Rotating about the ecliptic pole is a rigid motion: a near-circular orbit
+    // projects to the same ellipse whatever the azimuth, and only the planets
+    // travel along it. But the solver searches for the distance at which the
+    // widest projected orbit fills the frame, and that width includes the near
+    // arc, which *diverges* as the camera closes in. So the equation is unstable
+    // and settled somewhere different at every azimuth: the camera crept 18%
+    // in and out over one rotation, the ecliptic was seen from a changing
+    // height, and whole stretches of the outer orbit swung off the bottom of
+    // the frame and back. Solving once removes the wobble entirely.
+    let minimum_distance = extent * 1.05;
+    let at_distance = |distance: f32| place(0.0, distance);
 
     /// Widest the geometry reaches on each axis, or `None` if any is behind.
     fn measure(camera: &CameraState, points: &[Vec3], aspect: f32) -> Option<(f32, f32)> {
@@ -544,7 +557,11 @@ fn solve_at_elevation(
         .max(minimum_distance);
 
     if points.is_empty() {
-        return (at_distance(distance * camera.zoom.max(0.01)), 0.0, 0.0);
+        return (
+            place(camera.azimuth_deg, distance * camera.zoom.max(0.01)),
+            0.0,
+            0.0,
+        );
     }
 
     // Which axis the fit targets. Fitting the width uses only the horizontal
@@ -596,7 +613,11 @@ fn solve_at_elevation(
     // tilt. Cropping must not do that -- it is a scale change and nothing else.
     let framed = at_distance(distance);
     let (x, y) = measure(&framed, points, aspect).unwrap_or((0.0, 0.0));
-    (at_distance(distance * camera.zoom.max(0.01)), x, y)
+    (
+        place(camera.azimuth_deg, distance * camera.zoom.max(0.01)),
+        x,
+        y,
+    )
 }
 
 #[cfg(test)]
@@ -898,6 +919,74 @@ mod tests {
             clearance_px >= 12.0,
             "the lowest planet clears the bottom edge by {clearance_px:.1}px, \
              wanted at least 12px -- at or below zero it is being clipped"
+        );
+    }
+
+    /// Turning the system must be a rigid rotation, not a re-framing.
+    ///
+    /// Stick a pin through the Sun perpendicular to the ecliptic and turn it:
+    /// a near-circular orbit projects to the same ellipse whatever the azimuth,
+    /// and only the planets travel along it. Nothing should appear or disappear.
+    ///
+    /// It used to. The distance was re-solved every frame against a quantity
+    /// that diverges as the camera closes in, so it settled somewhere different
+    /// at every azimuth -- the camera crept 18% in and out over one rotation and
+    /// swung whole stretches of the outer orbit off the bottom of the frame.
+    #[test]
+    fn one_rotation_does_not_re_frame_the_scene() {
+        const ASPECT: f32 = 3440.0 / 1440.0;
+
+        let (mut nearest, mut furthest) = (f32::MAX, f32::MIN);
+        let (mut lowest_arc, mut worst_body, mut worst_azimuth) = (f32::MAX, f32::MAX, 0.0f32);
+
+        for azimuth in (0..360).step_by(3).map(|d| d as f32) {
+            let mut config = Config::default();
+            config.camera.azimuth_deg = azimuth;
+            config.camera.rotation_period_minutes = 0.0;
+
+            let scene = Scene::build(&config, &Lookup::builtin(), EPOCH, ASPECT);
+            let distance = scene.camera.eye.distance(scene.camera.target);
+            nearest = nearest.min(distance);
+            furthest = furthest.max(distance);
+
+            let view_projection = scene.camera.view_projection(ASPECT);
+            let ndc_of = |point: Vec3| {
+                let clip = view_projection * point.extend(1.0);
+                (clip.w > 0.0).then(|| clip.truncate() / clip.w)
+            };
+
+            for point in &scene.orbits.last().expect("an outermost orbit").points {
+                if let Some(ndc) = ndc_of(*point) {
+                    lowest_arc = lowest_arc.min(ndc.y);
+                }
+            }
+
+            let half_fov = (scene.camera.fov_y_radians * 0.5).tan();
+            for body in &scene.bodies {
+                let Some(ndc) = ndc_of(body.position) else { continue };
+                let radius = body.radius / (body.position.distance(scene.camera.eye) * half_fov);
+                if ndc.y - radius < worst_body {
+                    worst_body = ndc.y - radius;
+                    worst_azimuth = azimuth;
+                }
+            }
+        }
+
+        assert!(
+            furthest - nearest < 1e-3,
+            "the camera distance moved between {nearest:.4} and {furthest:.4} over one \
+             rotation; it must be solved once and reused, never re-solved per azimuth"
+        );
+        assert!(
+            lowest_arc > -1.0,
+            "the outermost orbit reached {lowest_arc:.4}, off the bottom of the frame"
+        );
+
+        let clearance_px = (worst_body + 1.0) * 720.0;
+        assert!(
+            clearance_px >= 12.0,
+            "at azimuth {worst_azimuth} the lowest planet clears the bottom edge by \
+             {clearance_px:.1}px, wanted at least 12px"
         );
     }
 

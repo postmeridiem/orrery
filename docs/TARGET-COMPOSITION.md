@@ -58,6 +58,32 @@ green while the picture was broken.
 
 "Visible half-width" counts only orbit points with `|ndc.y| <= 1`.
 
+## The whole rotation, not just azimuth 0
+
+The camera circles the Sun once an hour, so the numbers above have to hold at
+every azimuth, not only the one they were measured at. Swept in 1° steps:
+
+| Quantity | Across all 360° |
+|---|---|
+| Camera distance | 6.2334 exactly, unchanging |
+| Near arc of the outermost orbit | −0.9237 … −0.7255, never off frame |
+| Visible half-width of the outermost orbit | 0.839 … 0.869 |
+| Clearance under the lowest planet | 13 px at worst, at azimuth 358 |
+
+Turning the system is a rigid rotation: a near-circular orbit projects to the
+same ellipse whatever the azimuth, and only the planets travel along it.
+
+It did not behave that way at first. The distance was re-solved every frame,
+against a quantity that diverges as the camera closes in, so it settled
+somewhere different at every azimuth — **the camera crept 18 % in and out over
+one rotation** (6.23 down to 5.12), the ecliptic was seen from a changing
+height, and whole stretches of the outer orbit swung off the bottom of the frame
+and back. `one_rotation_does_not_re_frame_the_scene` exists to stop that
+returning.
+
+Neptune's eccentricity is 0.0086. Nothing about the geometry justified that
+movement, and no amount of tuning `offset_y` would have fixed it.
+
 ## Why the planet clearance is a criterion and not a detail
 
 At the locked framing the outermost orbit is **fully contained** — near arc
@@ -71,9 +97,15 @@ at the lowest point of its own orbit — so the orbit line can have clearance
 while the planet on it is sliced flat by the frame edge. That slice is what
 reads as a deliberate crop.
 
-Because Neptune is currently at that low point, this is the **worst case**.
-Clearing it here means no planet clips at the bottom at any date, and the
-framing stops depending on where anything happens to be.
+Because Neptune is currently at that low point, this is the worst case *at this
+epoch*, and the sweep above confirms 13 px in hand at every azimuth.
+
+It is **not** verified for every date, and was wrongly claimed to be. The
+deepest the near arc ever reaches is −0.9237, and an outer planet's disc is
+0.0776 across, so a planet sitting exactly at that deepest point would be
+tangent to the edge — margin roughly zero. Neptune works round its orbit over
+165 years, so that alignment does arrive eventually. An epoch sweep is needed
+before this is written down as a guarantee.
 
 For reference, measured at 1440p:
 
