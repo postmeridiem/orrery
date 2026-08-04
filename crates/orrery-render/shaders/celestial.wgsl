@@ -253,13 +253,6 @@ fn deep_sky_fragment(in: DeepSkyVertex) -> @location(0) vec4<f32> {
         density = density * (0.25 + 1.35 * fbm(noise_position * 1.9 + warp, 5));
     }
 
-    // Fade to exactly zero at the edge of the quad.
-    //
-    // None of the falloffs above reach zero on their own -- a globular cluster
-    // is still at 0.012 out here -- so discarding at radius 1 left a crisply
-    // rimmed disc that read as a small moon rather than as nebulosity. This is
-    // what makes them look like objects instead of blobs.
-    let window = pow(max(0.0, 1.0 - radius * radius), 2.0);
-    let brightness = density * window * in.prominence * globals.sky_c.w;
+    let brightness = density * in.prominence * globals.sky_c.w;
     return vec4<f32>(in.colour * max(brightness, 0.0), 1.0);
 }

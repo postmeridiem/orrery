@@ -38,8 +38,6 @@ struct Options {
     size: (u32, u32),
     /// Fetch a fresh almanac synchronously, report, and exit.
     refresh_ephemeris: bool,
-    /// Validate the configuration, report, and exit.
-    check_config: bool,
     /// Where `--refresh-ephemeris` writes. Defaults to the user cache path.
     ephemeris_out: Option<PathBuf>,
 }
@@ -55,21 +53,6 @@ fn main() -> Result<()> {
         .config_path
         .clone()
         .or_else(default_config_path);
-    // Validate before anything else, so a stale config is a clear message
-    // rather than a failure inside the renderer.
-    if options.check_config {
-        return match load_config(config_path.as_deref()) {
-            Ok(_) => {
-                println!("configuration is valid");
-                Ok(())
-            }
-            Err(error) => {
-                eprintln!("{error:#}");
-                std::process::exit(1);
-            }
-        };
-    }
-
     let config = load_config(config_path.as_deref())?;
 
     if options.refresh_ephemeris {
@@ -96,7 +79,6 @@ fn parse_arguments() -> Result<Options> {
         screenshot: None,
         size: (1920, 1080),
         refresh_ephemeris: false,
-        check_config: false,
         ephemeris_out: None,
     };
 
@@ -111,7 +93,6 @@ fn parse_arguments() -> Result<Options> {
                 );
             }
             "--windowed" | "-w" => options.windowed = true,
-            "--check-config" => options.check_config = true,
             "--refresh-ephemeris" => options.refresh_ephemeris = true,
             "--ephemeris-out" => {
                 options.ephemeris_out = Some(
@@ -143,7 +124,6 @@ fn parse_arguments() -> Result<Options> {
                      -w, --windowed          run in a normal resizable window\n      \
                      --screenshot <PATH>     render a single PNG frame and exit\n      \
                      --size <WxH>            size for --screenshot (default 1920x1080)\n      \
-                     --check-config          report whether the configuration is valid and exit\n      \
                      --refresh-ephemeris     fetch fresh elements from JPL Horizons and exit\n      \
                      --ephemeris-out <PATH>  where --refresh-ephemeris writes\n  \
                      -h, --help              show this message\n\n\

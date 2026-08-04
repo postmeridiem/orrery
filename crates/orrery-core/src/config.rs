@@ -120,10 +120,9 @@ pub struct Camera {
     pub fov_deg: f32,
     /// Multiplier on the framing distance. Below 1 crops in, above 1 pulls back.
     ///
-    /// The framing puts the whole scene just inside the frame, which leaves the
-    /// Kuiper belt's extremes sitting exactly at the edges and a fair amount of
-    /// empty sky. Cropping in past that is what makes the belt run off the
-    /// sides and gives the planets the middle of the picture.
+    /// The framing fits the whole scene inside the frame, which leaves the
+    /// Kuiper belt sitting exactly at the edges. `0.785` crops in by 1.274x so
+    /// the belt runs off the sides instead.
     pub zoom: f32,
     /// Minutes for the camera to travel once around the Sun. Zero holds still.
     ///
@@ -146,15 +145,6 @@ pub struct Camera {
     pub elevation_cycle_deg: f32,
     /// Fraction of the frame the outermost drawn orbit should span.
     pub fill: f32,
-    /// Where through each debris belt the left and right screen edges fall, as
-    /// a fraction of the belt's width.
-    ///
-    /// `0.5` puts them on the middle of the belt, so its outer half runs off
-    /// the sides. That is what stops the Kuiper belt dictating the scale of the
-    /// whole picture and crushing the planets into the centre. It does mean the
-    /// camera sits within the belt rather than outside it -- at 50 degrees,
-    /// just inside its mid-radius.
-    pub frame_belt_fraction: f32,
     /// Fit the scene to the frame's *width* rather than to whichever axis binds
     /// first.
     ///
@@ -183,7 +173,6 @@ impl Default for Camera {
             elevation_cycle_days: 0.0,
             elevation_cycle_deg: 40.0,
             fill: 0.94,
-            frame_belt_fraction: 0.5,
             fit_width: true,
             offset_x: 0.0,
             offset_y: 0.0,
@@ -323,10 +312,6 @@ pub struct Sky {
     /// of it is the middle of the picture.
     pub constellation_min_behind_sun: f32,
     /// Draw the curated deep-sky objects.
-    ///
-    /// Off by default: the procedural rendering of them does not currently look
-    /// good enough to earn its place. The catalogue and positions are sound, so
-    /// this is a rendering problem to revisit, not a data one.
     pub deep_sky: bool,
     pub deep_sky_opacity: f32,
 }
@@ -346,7 +331,7 @@ impl Default for Sky {
             constellations: true,
             constellation_opacity: 0.10,
             constellation_min_behind_sun: 0.8,
-            deep_sky: false,
+            deep_sky: true,
             deep_sky_opacity: 0.55,
         }
     }
@@ -518,9 +503,6 @@ impl Config {
         }
         if !(0.0..=100.0).contains(&self.lighting.sun_intensity) {
             return Err(ConfigError::Range("lighting.sun_intensity", "0.0 to 100.0"));
-        }
-        if !(0.0..=1.0).contains(&self.camera.frame_belt_fraction) {
-            return Err(ConfigError::Range("camera.frame_belt_fraction", "0.0 to 1.0"));
         }
         if !(0.0..=1.0).contains(&self.sky.constellation_min_behind_sun) {
             return Err(ConfigError::Range("sky.constellation_min_behind_sun", "0.0 to 1.0"));

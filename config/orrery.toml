@@ -8,10 +8,8 @@
 
 [camera]
 # Angle above the ecliptic plane. 90 looks straight down on the solar system,
-# 0 is edge-on.
-#
-# The oblique three-quarter view that makes the orbits read as ellipses rather
-# than as a flat line.
+# 0 is edge-on. The default is the oblique three-quarter view that makes the
+# orbits read as ellipses rather than circles.
 elevation_deg = 27.0
 # Rotation about the ecliptic pole: spins the whole system within the frame.
 azimuth_deg = 0.0
@@ -21,9 +19,8 @@ fov_deg = 55.0
 # Multiplier on the framing distance. Below 1 crops in, above 1 pulls back.
 #
 # The framing fits the whole scene inside the frame, which leaves the Kuiper
-# belt's extremes sitting exactly at the edges and a good deal of empty sky.
-# Cropping in past that is what makes the belt run off the sides and gives the
-# planets the middle of the picture. 0.785 is a 1.27x crop.
+# belt sitting exactly at the edges. 0.785 crops in by 1.274x so the belt runs
+# off the sides instead.
 zoom = 0.785
 # Minutes for the camera to travel once around the Sun. Zero holds still.
 #
@@ -45,20 +42,7 @@ elevation_cycle_days = 0.0
 elevation_cycle_deg = 40.0
 # Fraction of the frame the outermost drawn thing spans. Honoured exactly, at
 # every aspect ratio.
-# Fraction of the frame the whole scene spans before `zoom` is applied.
 fill = 0.94
-# Where through each debris belt the left and right screen edges fall, as a
-# fraction of the belt's width. 0.5 puts them on the middle of the Kuiper belt,
-# so its outer half runs off the sides. That is what stops the belt dictating
-# the scale of the whole picture and crushing the planets into the centre.
-#
-# It does mean the camera sits within the belt rather than outside it, and that
-# the outermost orbit sweeps off the edges. That is unavoidable rather than a
-# defect: the near side of an outer orbit is always far closer to the camera
-# than the far side, so containing it entirely means retreating until
-# everything is tiny. Raise this to pull back, lower it to come closer.
-frame_belt_fraction = 0.5
-
 # Fit to the frame's *width* rather than to whichever axis binds first.
 #
 # On a wide monitor the solar system is far wider than it is tall, so fitting
@@ -153,12 +137,9 @@ constellation_opacity = 0.10
 constellation_min_behind_sun = 0.8
 
 # 23 curated deep-sky objects at their true positions -- Orion, Andromeda, the
-# Pleiades, the Magellanic Clouds and so on.
-#
-# Off for now: the procedural rendering of them is not good enough to earn its
-# place. The catalogue and the positions are sound, so this is a rendering
-# problem to revisit rather than a data one. Set true to see them.
-deep_sky = false
+# Pleiades, the Magellanic Clouds and so on. Curated rather than exhaustive,
+# because a full catalogue would only be clutter.
+deep_sky = true
 deep_sky_opacity = 0.55
 
 [orbits]
