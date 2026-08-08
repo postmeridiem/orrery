@@ -3,7 +3,8 @@
 //! Two sources, in preference order:
 //!
 //! 1. An [`Almanac`] of osculating elements looked up from JPL Horizons, good
-//!    to about 0.18 arcseconds while it covers the moment being drawn.
+//!    to under a tenth of an arcsecond (0.079″ measured — see
+//!    `tests/almanac_accuracy.rs`) while it covers the moment being drawn.
 //! 2. The built-in Standish tables, good to 0.11° in the worst case, always
 //!    available and needing no network.
 //!
@@ -85,9 +86,11 @@ impl Lookup {
 
     /// Is every drawn body being served by the almanac at `at`?
     pub fn fully_covered(&self, at: JulianDate) -> bool {
-        self.almanac
-            .as_ref()
-            .is_some_and(|almanac| Planet::ALL.iter().all(|p| almanac.position(*p, at).is_some()))
+        self.almanac.as_ref().is_some_and(|almanac| {
+            Planet::ALL
+                .iter()
+                .all(|p| almanac.position(*p, at).is_some())
+        })
     }
 }
 
@@ -113,7 +116,7 @@ mod tests {
                     argument_of_perihelion: k.argument_of_perihelion(),
                     mean_anomaly: k.mean_anomaly(),
                     // Kepler's third law, in degrees per day.
-                    mean_motion: 0.985_608_/ k.a.powf(1.5),
+                    mean_motion: 0.985_608 / k.a.powf(1.5),
                 }
             })
             .collect();

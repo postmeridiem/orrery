@@ -76,6 +76,8 @@ impl Planet {
             .find(|p| p.name().eq_ignore_ascii_case(s))
     }
 
+    // The table below is hand-aligned, one line per element set.
+    #[rustfmt::skip]
     const fn elements(self) -> Elements {
         match self {
             Planet::Mercury => Elements {
@@ -153,12 +155,6 @@ impl Kepler {
         wrap_degrees_signed(self.mean_longitude - self.longitude_of_perihelion)
     }
 
-    /// Orbital period in Julian years, from Kepler's third law. Exact enough
-    /// for heliocentric orbits where the Sun dominates the mass.
-    pub fn period_years(&self) -> f64 {
-        self.a.powf(1.5)
-    }
-
     /// Position in the J2000 ecliptic frame (AU) at the given eccentric
     /// anomaly, in degrees. Sweeping `E` over 0..360 traces the full orbit,
     /// which is how the renderer builds its orbit rings.
@@ -172,10 +168,7 @@ impl Kepler {
         // Rotate: argument of perihelion, then inclination, then node.
         let (sin_w, cos_w) = self.argument_of_perihelion().to_radians().sin_cos();
         let (sin_i, cos_i) = self.i.to_radians().sin_cos();
-        let (sin_o, cos_o) = self
-            .longitude_of_ascending_node
-            .to_radians()
-            .sin_cos();
+        let (sin_o, cos_o) = self.longitude_of_ascending_node.to_radians().sin_cos();
 
         DVec3::new(
             (cos_w * cos_o - sin_w * sin_o * cos_i) * x
@@ -239,7 +232,11 @@ pub fn solve_kepler(mean_anomaly_deg: f64, e: f64) -> f64 {
 /// Wrap an angle in degrees to [−180, 180).
 fn wrap_degrees_signed(deg: f64) -> f64 {
     let wrapped = deg.rem_euclid(360.0);
-    if wrapped >= 180.0 { wrapped - 360.0 } else { wrapped }
+    if wrapped >= 180.0 {
+        wrapped - 360.0
+    } else {
+        wrapped
+    }
 }
 
 /// Geocentric position of the Moon in the J2000 ecliptic frame, in AU.
@@ -373,6 +370,7 @@ mod tests {
     /// the JPL Horizons API for the planet–satellite **barycentres**, which is
     /// what Standish's table tabulates. Three epochs spanning the table's
     /// validity window: 1990-01-01, 2026-08-03 and 2044-09-27 TDB.
+    #[rustfmt::skip]
     const HORIZONS_REFERENCE: &[(Planet, f64, DVec3)] = &[
         (Planet::Mercury, 2_447_892.5, DVec3::new(0.163_713_445, 0.263_685_634, 0.006_505_844)),
         (Planet::Mercury, 2_461_255.5, DVec3::new(0.336_033_850, 0.064_131_619, -0.025_578_796)),
@@ -449,8 +447,7 @@ mod tests {
                 2e-4
             };
             let actual = heliocentric_position(planet, JulianDate(jd));
-            let relative_error =
-                (actual.length() - expected.length()).abs() / expected.length();
+            let relative_error = (actual.length() - expected.length()).abs() / expected.length();
             assert!(
                 relative_error < tolerance,
                 "{} at JD {jd}: distance {:.6} AU vs {:.6} AU ({:.2e} relative)",
@@ -466,9 +463,18 @@ mod tests {
     #[test]
     fn moon_matches_jpl_horizons() {
         let reference = [
-            (2_461_255.5, DVec3::new(0.002_571_131, 0.000_065_456, 0.000_125_351)),
-            (2_461_270.5, DVec3::new(-0.002_251_254, -0.001_341_201, -0.000_212_484)),
-            (2_461_285.5, DVec3::new(0.001_947_533, 0.001_565_272, 0.000_215_640)),
+            (
+                2_461_255.5,
+                DVec3::new(0.002_571_131, 0.000_065_456, 0.000_125_351),
+            ),
+            (
+                2_461_270.5,
+                DVec3::new(-0.002_251_254, -0.001_341_201, -0.000_212_484),
+            ),
+            (
+                2_461_285.5,
+                DVec3::new(0.001_947_533, 0.001_565_272, 0.000_215_640),
+            ),
         ];
         for (jd, expected) in reference {
             let actual = geocentric_moon_position(JulianDate(jd));

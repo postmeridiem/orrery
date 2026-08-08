@@ -1,6 +1,6 @@
-// The real sky: catalogued stars, constellation figures and deep-sky objects.
+// The real sky: catalogued stars and constellation figures.
 //
-// All three are billboards on a sphere at effectively infinite distance, drawn
+// Both are billboards on a sphere at effectively infinite distance, drawn
 // after the procedural background and before the planets, with depth writes off
 // so the solar system always occludes them.
 

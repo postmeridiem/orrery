@@ -17,12 +17,7 @@ use orrery_render::Renderer;
 /// boundary, so the readback buffer is usually wider than the image.
 const COPY_ALIGNMENT: u32 = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
 
-pub fn capture(
-    config: &Config,
-    lookup: &Lookup,
-    size: (u32, u32),
-    path: &Path,
-) -> Result<()> {
+pub fn capture(config: &Config, lookup: &Lookup, size: (u32, u32), path: &Path) -> Result<()> {
     let (width, height) = (size.0.max(1), size.1.max(1));
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
 
@@ -137,8 +132,8 @@ pub fn capture(
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent)?;
     }
-    let file = std::fs::File::create(path)
-        .with_context(|| format!("creating {}", path.display()))?;
+    let file =
+        std::fs::File::create(path).with_context(|| format!("creating {}", path.display()))?;
     let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), width, height);
     encoder.set_color(png::ColorType::Rgba);
     encoder.set_depth(png::BitDepth::Eight);

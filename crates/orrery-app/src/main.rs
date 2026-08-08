@@ -32,6 +32,7 @@ use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
 /// How the binary was asked to run.
+#[derive(Debug)]
 struct Options {
     config_path: Option<PathBuf>,
     windowed: bool,
@@ -51,11 +52,8 @@ fn main() -> Result<()> {
     )
     .init();
 
-    let options = parse_arguments()?;
-    let config_path = options
-        .config_path
-        .clone()
-        .or_else(default_config_path);
+    let options = parse_arguments(std::env::args().skip(1))?;
+    let config_path = options.config_path.clone().or_else(default_config_path);
     // Validate before anything else, so a stale config is a clear message
     // rather than a failure inside the renderer.
     if options.check_config {
@@ -90,7 +88,9 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn parse_arguments() -> Result<Options> {
+/// Takes the arguments as a parameter — rather than reading the environment
+/// itself — so the flag handling is testable.
+fn parse_arguments(args: impl IntoIterator<Item = String>) -> Result<Options> {
     let mut options = Options {
         config_path: None,
         windowed: false,
@@ -101,25 +101,18 @@ fn parse_arguments() -> Result<Options> {
         ephemeris_out: None,
     };
 
-    let mut args = std::env::args().skip(1);
+    let mut args = args.into_iter();
     while let Some(argument) = args.next() {
         match argument.as_str() {
             "--config" | "-c" => {
-                options.config_path = Some(
-                    args.next()
-                        .context("--config needs a path")?
-                        .into(),
-                );
+                options.config_path = Some(args.next().context("--config needs a path")?.into());
             }
             "--windowed" | "-w" => options.windowed = true,
             "--check-config" => options.check_config = true,
             "--refresh-ephemeris" => options.refresh_ephemeris = true,
             "--ephemeris-out" => {
-                options.ephemeris_out = Some(
-                    args.next()
-                        .context("--ephemeris-out needs a path")?
-                        .into(),
-                );
+                options.ephemeris_out =
+                    Some(args.next().context("--ephemeris-out needs a path")?.into());
             }
             "--screenshot" => {
                 options.screenshot = Some(
@@ -180,22 +173,18 @@ fn load_config(path: Option<&std::path::Path>) -> Result<Config> {
     };
     match std::fs::read_to_string(path) {
         Ok(text) => {
-            let config = Config::from_toml(&text)
-                .with_context(|| format!("in {}", path.display()))?;
+            let config =
+                Config::from_toml(&text).with_context(|| format!("in {}", path.display()))?;
             log::info!("loaded configuration from {}", path.display());
             Ok(config)
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            log::info!(
-                "no configuration at {}, using defaults",
-                path.display()
-            );
+            log::info!("no configuration at {}, using defaults", path.display());
             Ok(Config::default())
         }
         Err(error) => Err(error).with_context(|| format!("reading {}", path.display())),
     }
 }
-
 
 /// Fetch a fresh almanac synchronously and write it out. This is the path a
 /// cron job or systemd timer would use, and how the bundled almanac is made.
@@ -219,9 +208,10 @@ fn refresh_ephemeris_now(destination: Option<PathBuf>) -> Result<()> {
 }
 
 /// An almanac fetched at build time, so a fresh install is accurate straight
-/// away and stays accurate with the network permanently disabled. Once it stops
-/// covering the present it simply stops being used and the built-in tables take
-/// over, which is also what triggers a refresh.
+/// away and stays accurate with the network permanently disabled. Its epochs
+/// cover about fourteen months from when it was fetched; once it stops
+/// covering the present it simply stops being used and the built-in tables
+/// take over, which is also what triggers a refresh.
 const BUNDLED_ALMANAC: &str = include_str!("../../../data/almanac.toml");
 
 /// How often a healthy process re-asks whether the almanac needs refreshing.
@@ -306,6 +296,8 @@ struct App {
     device_lost: Arc<AtomicBool>,
     /// Belts and orbit geometry reused across frames.
     scene_cache: SceneCache,
+    /// Whether the once-per-session out-of-validity warning has fired.
+    warned_outside_tables: bool,
     /// When the surface started reporting `Occluded`, if it currently does.
     /// Drives the slow-tick backoff and, after a few seconds, the release of
     /// the render targets' VRAM.
@@ -323,12 +315,7 @@ const OCCLUDED_RELEASE_AFTER: Duration = Duration::from_secs(5);
 const OCCLUDED_FRAME_BUDGET: Duration = Duration::from_secs(1);
 
 impl App {
-    fn new(
-        config: Config,
-        config_path: Option<PathBuf>,
-        options: Options,
-        lookup: Lookup,
-    ) -> Self {
+    fn new(config: Config, config_path: Option<PathBuf>, options: Options, lookup: Lookup) -> Self {
         let epoch = config.time.start_epoch().unwrap_or_else(|error| {
             log::warn!("ignoring unusable [time] date: {error}");
             JulianDate::now()
@@ -360,6 +347,7 @@ impl App {
             refresh_backoff: REFRESH_RETRY_MIN,
             device_lost: Arc::new(AtomicBool::new(false)),
             scene_cache: SceneCache::new(),
+            warned_outside_tables: false,
             occluded_since: None,
         };
         app.start_refresh_if_due();
@@ -376,8 +364,11 @@ impl App {
             return;
         }
         let now = JulianDate::now();
-        if !horizons::needs_refresh(self.lookup.almanac(), now, self.config.ephemeris.refresh_days)
-        {
+        if !horizons::needs_refresh(
+            self.lookup.almanac(),
+            now,
+            self.config.ephemeris.refresh_days,
+        ) {
             return;
         }
 
@@ -452,9 +443,7 @@ impl App {
                     None => JulianDate::now(),
                 }
             }
-            TimeMode::Live => {
-                JulianDate(self.epoch.0 + elapsed * self.config.time.days_per_second)
-            }
+            TimeMode::Live => JulianDate(self.epoch.0 + elapsed * self.config.time.days_per_second),
         }
     }
 
@@ -500,7 +489,24 @@ impl App {
         // Sample the clock before borrowing `graphics` mutably.
         let epoch = self.current_epoch();
         let elapsed = self.started.elapsed().as_secs_f64();
-        let Some(graphics) = &mut self.graphics else { return };
+
+        // The built-in tables document a validity span and nothing enforced
+        // it: a config dated 1500, or a fast time-lapse left running, renders
+        // a confidently wrong sky. Warn once — never clamp; a wallpaper in
+        // 2051 should keep drawing.
+        use orrery_core::ephemeris::{VALID_FROM, VALID_TO};
+        if !(VALID_FROM..=VALID_TO).contains(&epoch.0) && !self.warned_outside_tables {
+            self.warned_outside_tables = true;
+            log::warn!(
+                "epoch JD {:.1} is outside the built-in tables' 1800–2050 validity \
+                 span; positions will drift from the truth",
+                epoch.0
+            );
+        }
+
+        let Some(graphics) = &mut self.graphics else {
+            return;
+        };
 
         let size = graphics.window.inner_size();
         if size.width == 0 || size.height == 0 {
@@ -778,7 +784,9 @@ impl App {
             // Tonemapping dithers in linear space expecting the hardware to
             // apply the sRGB transfer function; without it the output is
             // visibly wrong, but still better than refusing to start.
-            log::warn!("no sRGB surface format available; using {format:?} and colours will be off");
+            log::warn!(
+                "no sRGB surface format available; using {format:?} and colours will be off"
+            );
         }
         // `Opaque` is not universal; fall back to whatever the compositor
         // advertises rather than failing surface configuration.
@@ -832,14 +840,13 @@ fn watch_config(path: &std::path::Path) -> Result<(Receiver<()>, notify::Recomme
         .to_path_buf();
     let watched = path.to_path_buf();
 
-    let mut watcher =
-        notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-            if let Ok(event) = event
-                && event.paths.contains(&watched)
-            {
-                let _ = tx.send(());
-            }
-        })?;
+    let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+        if let Ok(event) = event
+            && event.paths.contains(&watched)
+        {
+            let _ = tx.send(());
+        }
+    })?;
     watcher.watch(&directory, notify::RecursiveMode::NonRecursive)?;
     Ok((rx, watcher))
 }
@@ -847,6 +854,60 @@ fn watch_config(path: &std::path::Path) -> Result<(Receiver<()>, notify::Recomme
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn parse(args: &[&str]) -> Result<Options> {
+        parse_arguments(args.iter().map(|s| (*s).to_owned()))
+    }
+
+    #[test]
+    fn arguments_parse_into_their_options() {
+        let options = parse(&[]).unwrap();
+        assert!(options.config_path.is_none() && !options.windowed);
+        assert_eq!(options.size, (1920, 1080));
+
+        let options = parse(&[
+            "--config",
+            "/tmp/x.toml",
+            "-w",
+            "--screenshot",
+            "out.png",
+            "--size",
+            "3840x2160",
+        ])
+        .unwrap();
+        assert_eq!(
+            options.config_path.as_deref(),
+            Some(std::path::Path::new("/tmp/x.toml"))
+        );
+        assert!(options.windowed);
+        assert_eq!(
+            options.screenshot.as_deref(),
+            Some(std::path::Path::new("out.png"))
+        );
+        assert_eq!(options.size, (3840, 2160));
+
+        assert!(parse(&["--check-config"]).unwrap().check_config);
+        let refresh = parse(&["--refresh-ephemeris", "--ephemeris-out", "a.toml"]).unwrap();
+        assert!(refresh.refresh_ephemeris);
+        assert_eq!(
+            refresh.ephemeris_out.as_deref(),
+            Some(std::path::Path::new("a.toml"))
+        );
+    }
+
+    #[test]
+    fn bad_arguments_fail_with_the_offender_named() {
+        for (args, expect) in [
+            (&["--frobnicate"][..], "--frobnicate"),
+            (&["--config"][..], "--config"),
+            (&["--size"][..], "--size"),
+            (&["--size", "1920"][..], "1920x1080"),
+            (&["--size", "widexhigh"][..], "wide"),
+        ] {
+            let error = format!("{:#}", parse(args).unwrap_err());
+            assert!(error.contains(expect), "{args:?}: {error}");
+        }
+    }
 
     #[test]
     fn retry_backoff_doubles_and_caps_at_the_daily_check() {
@@ -856,7 +917,10 @@ mod tests {
         // settles at one attempt per day rather than growing without bound.
         for _ in 0..10 {
             assert!(delay > previous, "backoff must not shrink");
-            assert!(delay <= REFRESH_CHECK_INTERVAL, "backoff must cap at the daily check");
+            assert!(
+                delay <= REFRESH_CHECK_INTERVAL,
+                "backoff must cap at the daily check"
+            );
             previous = delay;
             let next = next_retry_backoff(delay);
             if next == delay {
@@ -864,7 +928,13 @@ mod tests {
             }
             delay = next;
         }
-        assert_eq!(delay, REFRESH_CHECK_INTERVAL, "the cap is the daily check interval");
-        assert_eq!(next_retry_backoff(REFRESH_CHECK_INTERVAL), REFRESH_CHECK_INTERVAL);
+        assert_eq!(
+            delay, REFRESH_CHECK_INTERVAL,
+            "the cap is the daily check interval"
+        );
+        assert_eq!(
+            next_retry_backoff(REFRESH_CHECK_INTERVAL),
+            REFRESH_CHECK_INTERVAL
+        );
     }
 }

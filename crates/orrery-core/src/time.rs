@@ -52,11 +52,9 @@ impl JulianDate {
         };
         let a = (y as f64 / 100.0).floor();
         let b = 2.0 - a + (a / 4.0).floor();
-        let jd_utc = (365.25 * (y as f64 + 4716.0)).floor()
-            + (30.6001 * (m as f64 + 1.0)).floor()
-            + day
-            + b
-            - 1524.5;
+        let jd_utc =
+            (365.25 * (y as f64 + 4716.0)).floor() + (30.6001 * (m as f64 + 1.0)).floor() + day + b
+                - 1524.5;
         Self(jd_utc + (TAI_MINUS_UTC + TT_MINUS_TAI) / 86_400.0)
     }
 

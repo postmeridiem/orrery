@@ -14,6 +14,7 @@ use orrery_core::time::JulianDate;
 
 /// Heliocentric ecliptic-J2000 position vectors (AU) of the planetary
 /// barycentres, from the JPL Horizons API.
+#[rustfmt::skip]
 const REFERENCE: &[(Planet, f64, DVec3)] = &[
     (Planet::Mercury, 2461255.5, DVec3::new(0.336033850, 0.064131619, -0.025578796)),
     (Planet::Mercury, 2461390.5, DVec3::new(-0.267611805, -0.370470297, -0.005732107)),
@@ -101,7 +102,10 @@ fn almanac_positions_are_sub_arcsecond() {
         worst = worst.max(error);
     }
     assert!(worst > 0.0, "the comparison must be doing something");
-    println!("worst almanac error: {worst:.7} deg = {:.3} arcsec", worst * 3600.0);
+    println!(
+        "worst almanac error: {worst:.7} deg = {:.3} arcsec",
+        worst * 3600.0
+    );
 }
 
 /// And it must beat the built-in tables, which is the entire reason the
@@ -119,8 +123,7 @@ fn the_almanac_beats_the_built_in_tables() {
     for &(planet, jd, truth) in REFERENCE {
         let at = JulianDate(jd);
         let almanac_error = separation_deg(lookup.position(planet, at), truth);
-        let builtin_error =
-            separation_deg(ephemeris::heliocentric_position(planet, at), truth);
+        let builtin_error = separation_deg(ephemeris::heliocentric_position(planet, at), truth);
         worst_almanac = worst_almanac.max(almanac_error);
         worst_builtin = worst_builtin.max(builtin_error);
         if planet == Planet::Saturn {

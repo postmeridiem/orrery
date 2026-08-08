@@ -3,7 +3,9 @@
 //! Everything here is at its true position. Stars come from the Yale Bright
 //! Star Catalogue down to visual magnitude 6.5 — the whole naked-eye sky —
 //! with real magnitudes and colours. Deep-sky positions and angular sizes come
-//! from SIMBAD.
+//! from SIMBAD; note the renderer does not currently *draw* them — the data
+//! and its parser are kept because the coordinates were expensive to verify
+//! (`data/SOURCES.md` records that decision).
 //!
 //! Catalogue coordinates are equatorial J2000; the renderer works in an
 //! ecliptic frame with Y up. The conversion is a single rotation about the
@@ -123,17 +125,10 @@ impl Catalog {
         })
     }
 
-    /// Stars brighter than `limit`, brightest first.
+    /// Stars brighter than `limit`, in catalogue (HR-number) order — the
+    /// order [`Catalog::stars`] is sorted in, not by brightness.
     pub fn stars_to_magnitude(&self, limit: f32) -> impl Iterator<Item = &Star> {
         self.stars.iter().filter(move |s| s.magnitude <= limit)
-    }
-
-    /// Look a star up by its Harvard Revised number.
-    pub fn star(&self, hr: u32) -> Option<&Star> {
-        self.stars
-            .binary_search_by_key(&hr, |s| s.hr)
-            .ok()
-            .map(|index| &self.stars[index])
     }
 }
 
@@ -200,11 +195,7 @@ pub fn color_from_index(b_minus_v: f64) -> [f32; 3] {
 /// sounds right and is far too strict in practice: the band of sky in view is
 /// only a few tens of degrees tall, so almost every constellation is larger
 /// than the frame and nothing was ever drawn.
-pub fn figure_is_visible(
-    segments: &[(Vec3, Vec3)],
-    forward: Vec3,
-    min_behind_sun: f32,
-) -> bool {
+pub fn figure_is_visible(segments: &[(Vec3, Vec3)], forward: Vec3, min_behind_sun: f32) -> bool {
     if segments.is_empty() {
         return false;
     }
@@ -322,7 +313,9 @@ pub fn parse_deep_sky(text: &str) -> Result<Vec<DeepSky>, CatalogError> {
             ),
             angular_radius_deg: radius.parse().map_err(|_| fail("unparseable radius"))?,
             kind,
-            prominence: prominence.parse().map_err(|_| fail("unparseable prominence"))?,
+            prominence: prominence
+                .parse()
+                .map_err(|_| fail("unparseable prominence"))?,
         });
     }
     Ok(objects)
@@ -413,11 +406,11 @@ mod tests {
     fn transform_preserves_angular_separation() {
         let samples = [
             (0.0, 0.0),
-            (101.287, -16.716),  // Sirius
-            (79.172, 45.998),    // Capella
-            (213.915, 19.182),   // Arcturus
-            (279.235, 38.784),   // Vega
-            (37.954, 89.264),    // Polaris
+            (101.287, -16.716), // Sirius
+            (79.172, 45.998),   // Capella
+            (213.915, 19.182),  // Arcturus
+            (279.235, 38.784),  // Vega
+            (37.954, 89.264),   // Polaris
             (180.0, -60.0),
         ];
         for (index, a) in samples.iter().enumerate() {
@@ -468,7 +461,10 @@ mod tests {
         let cool = color_from_index(1.85); // Betelgeuse
 
         assert!(hot[2] > hot[0], "a hot star must be bluer than it is red");
-        assert!(cool[0] > cool[2], "a cool star must be redder than it is blue");
+        assert!(
+            cool[0] > cool[2],
+            "a cool star must be redder than it is blue"
+        );
         // The Sun sits between the two.
         assert!(sun[0] > hot[0] && sun[2] > cool[2]);
         for colour in [hot, sun, cool] {
@@ -482,7 +478,10 @@ mod tests {
     fn temperatures_are_plausible() {
         // Vega, B-V 0.00, Teff about 9600 K.
         let vega = temperature_from_color_index(0.0);
-        assert!((8000.0..11000.0).contains(&vega), "Vega came out at {vega} K");
+        assert!(
+            (8000.0..11000.0).contains(&vega),
+            "Vega came out at {vega} K"
+        );
         // Betelgeuse, B-V 1.85, Teff about 3600 K.
         let betelgeuse = temperature_from_color_index(1.85);
         assert!(
@@ -513,10 +512,10 @@ mod tests {
     #[test]
     fn rejects_malformed_star_data() {
         for bad in [
-            "hr,ra,dec,v,bv\n2491,999.0,-16.7,-1.46,0.0\n",   // ra out of range
-            "hr,ra,dec,v,bv\n2491,101.2,-99.0,-1.46,0.0\n",   // dec out of range
-            "hr,ra,dec,v,bv\n2491,101.2,-16.7\n",             // truncated
-            "hr,ra,dec,v,bv\n2491,abc,-16.7,-1.46,0.0\n",     // unparseable
+            "hr,ra,dec,v,bv\n2491,999.0,-16.7,-1.46,0.0\n", // ra out of range
+            "hr,ra,dec,v,bv\n2491,101.2,-99.0,-1.46,0.0\n", // dec out of range
+            "hr,ra,dec,v,bv\n2491,101.2,-16.7\n",           // truncated
+            "hr,ra,dec,v,bv\n2491,abc,-16.7,-1.46,0.0\n",   // unparseable
             // HR is an identity, so anything but a whole number would silently
             // mis-resolve a constellation segment if it were truncated through.
             "hr,ra,dec,v,bv\n2491.7,101.2,-16.7,-1.46,0.0\n", // fractional hr
@@ -533,8 +532,7 @@ mod tests {
             "hr,ra,dec,v,bv\n1713,78.6346,-8.2017,0.12,-0.03\n2061,88.7929,7.4069,0.50,1.85\n",
         )
         .unwrap();
-        let figures =
-            parse_constellations("abbr,name,a,b\nOri,Orion,1713,2061\n", &stars).unwrap();
+        let figures = parse_constellations("abbr,name,a,b\nOri,Orion,1713,2061\n", &stars).unwrap();
         assert_eq!(figures.len(), 1);
         assert_eq!(figures[0].segments.len(), 1);
 

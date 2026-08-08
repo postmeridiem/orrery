@@ -3,9 +3,11 @@
 An astronomically accurate, animated solar system for your desktop background.
 
 Real planetary positions from JPL Horizons, refreshed once a year and accurate
-to a tenth of an arcsecond, against the real sky: 8,404 catalogued stars, 20
-constellation figures and 23 deep-sky objects, all where they actually are.
-Rendered in HDR with wgpu. No texture assets — the whole thing is one binary.
+to a tenth of an arcsecond, against the real sky: 8,404 catalogued stars and 20
+constellation figures, all where they actually are. (A catalogue of 23 deep-sky
+objects is compiled in and verified too, awaiting a rendering treatment that
+does them justice.) Rendered in HDR with wgpu. No texture assets — the whole
+thing is one binary.
 
 ![the default view](docs/preview.png)
 
@@ -61,6 +63,9 @@ the Moon's apparent diameter, far finer than a pixel.
   the present, so a clock jump triggers a refresh too.
 - A **bundled almanac** ships with the binary, so a fresh install is
   arcsecond-accurate immediately, even with the network permanently disabled.
+  Its epochs cover about fourteen months from the release it shipped with;
+  past them a permanently offline install quietly continues on the built-in
+  tables, as designed.
 - `online = false` disables it entirely.
 
 Refresh manually, or from a cron job or systemd timer:

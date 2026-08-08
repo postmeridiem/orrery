@@ -1,0 +1,28 @@
+# Formatting, lints and the full test suite. No GPU in CI, so rendering
+# itself is exercised by the tests' pure functions; pixel-level verification
+# runs locally against a software rasterizer (see REVIEW.md).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Formatting
+        run: cargo fmt --check
+      - name: Lints
+        run: cargo clippy --workspace --tests -- -D warnings
+      - name: Tests
+        run: cargo test --workspace

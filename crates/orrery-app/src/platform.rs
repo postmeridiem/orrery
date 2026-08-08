@@ -50,8 +50,7 @@ pub fn configure_window(window: &Window, windowed: bool) {
         // This whole path is unverified on hardware, so nothing in it may
         // panic: a wallpaper that cannot reach the desktop level should run
         // as a normal window, not abort.
-        let Some(view): Option<Retained<NSView>> =
-            Retained::retain(appkit.ns_view.as_ptr().cast())
+        let Some(view): Option<Retained<NSView>> = Retained::retain(appkit.ns_view.as_ptr().cast())
         else {
             log::warn!("winit returned a null NSView; leaving the window at its default level");
             return;

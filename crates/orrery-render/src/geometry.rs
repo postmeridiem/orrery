@@ -129,7 +129,9 @@ mod tests {
         let mesh = sphere(24, 12);
         assert_eq!(mesh.indices.len() % 3, 0);
         assert!(
-            mesh.indices.iter().all(|i| (*i as usize) < mesh.vertices.len()),
+            mesh.indices
+                .iter()
+                .all(|i| (*i as usize) < mesh.vertices.len()),
             "index out of range"
         );
     }
@@ -176,7 +178,11 @@ mod tests {
             assert!(v.uv[0] == 0.0 || v.uv[0] == 1.0, "uv.x marks which edge");
         }
         assert_eq!(mesh.indices.len() % 3, 0);
-        assert!(mesh.indices.iter().all(|i| (*i as usize) < mesh.vertices.len()));
+        assert!(
+            mesh.indices
+                .iter()
+                .all(|i| (*i as usize) < mesh.vertices.len())
+        );
         // Both edges must be present, or the shader has nothing to interpolate.
         assert!(mesh.vertices.iter().any(|v| v.uv[0] == 0.0));
         assert!(mesh.vertices.iter().any(|v| v.uv[0] == 1.0));

@@ -1,0 +1,4 @@
+# Stock rustfmt, pinned by this file's presence: the whole tree is formatted
+# with defaults, and CI runs `cargo fmt --check`. Hand-aligned data tables
+# (the planetary element tables, the Horizons reference vectors) carry
+# `#[rustfmt::skip]` where alignment is the point.

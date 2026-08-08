@@ -22,7 +22,8 @@ pollster.workspace = true
 wgpu.workspace = true
 winit.workspace = true
 png = "0.18"
-ureq = "3"
+# Nine plain GETs a year to one HTTPS host: TLS is all it needs.
+ureq = { version = "3", default-features = false, features = ["rustls", "gzip"] }
 
 # macOS has no wallpaper-plugin API, so the window is placed at the desktop
 # level directly. Developed against the AppKit docs but unverified on hardware.

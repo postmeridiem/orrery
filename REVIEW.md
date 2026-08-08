@@ -1,5 +1,15 @@
 # Code review & improvement plan
 
+> **Implementation status.** All four phases of §7 are implemented on this
+> branch: Phase 1 in `515e56a`, Phase 2 in `aeb8b4d`, Phase 3 in `33f2b26`,
+> Phase 4 in the commit that updated this note. Phases 1–2 verified
+> byte-identical to `64a5ed1` under llvmpipe at 640×360 and 1920×1080;
+> Phase 3 differs on 0.05% of pixels by one 8-bit step (the tonemap's own
+> dither amplitude) from the sky shader moving to a single-sample pipeline.
+> The §6 line-width fix remains deliberately unapplied, and the on-hardware
+> checklist at the end of §7 remains open. File:line references throughout
+> describe `64a5ed1` and are left as the review record.
+
 Reviewed at `64a5ed1`, February 2026 toolchain (`edition = "2024"`, wgpu 30,
 winit 0.30). Scope: the whole workspace, with emphasis on **resource usage**
 (this process runs 24/7), **GPU binding**, and **coding standards / primitive

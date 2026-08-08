@@ -12,7 +12,9 @@ repository = "https://github.com/jschweitzer/orrery"
 [workspace.dependencies]
 anyhow = "1"
 bytemuck = { version = "1", features = ["derive"] }
-glam = { version = "0.33", features = ["bytemuck", "serde"] }
+# No feature flags: nothing serialises a glam type, and the renderer builds
+# its own #[repr(C)] GPU structs rather than bytemuck-casting glam ones.
+glam = "0.33"
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 toml = "0.9"
@@ -21,7 +23,9 @@ winit = "0.30"
 pollster = "1.0"
 log = "0.4"
 env_logger = "0.11"
-notify = "8"
+# Default features pull crossbeam-channel; the watcher callback feeds a
+# std::sync::mpsc channel instead.
+notify = { version = "8", default-features = false, features = ["macos_fsevent"] }
 orrery-core = { path = "crates/orrery-core" }
 orrery-render = { path = "crates/orrery-render" }
 

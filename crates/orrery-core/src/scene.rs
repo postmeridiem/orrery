@@ -58,9 +58,12 @@ const ORBIT_SEGMENTS: u32 = 512;
 /// and the phase and the side it sits on read correctly.
 const MOON_DISTANCE_BOOST: f32 = 3.5;
 
-/// Particles in the asteroid belt. The Kuiper belt gets 1.6× this, being both
-/// wider and more populous.
+/// Particles in the asteroid belt.
 const BELT_PARTICLES: u32 = 6_000;
+
+/// Particles in the Kuiper belt: 1.6× the main belt, being both wider and
+/// more populous.
+const KUIPER_PARTICLES: u32 = BELT_PARTICLES * 8 / 5;
 
 /// One drawn body.
 #[derive(Debug, Clone)]
@@ -131,8 +134,9 @@ fn random_unit(seed: u32, index: u32, stream: u32) -> f64 {
     hash_u32(seed ^ hash_u32(index.wrapping_mul(0x9E37_79B9) ^ stream)) as f64 / u32::MAX as f64
 }
 
-/// Scatter `count` particles through a torus between `inner_au` and `outer_au`.
-fn build_belt(
+/// Everything that shapes one debris belt, so [`build_belt`] takes a
+/// description rather than nine loose arguments.
+struct BeltSpec {
     name: &'static str,
     inner_au: f64,
     outer_au: f64,
@@ -141,29 +145,27 @@ fn build_belt(
     seed: u32,
     color: [f32; 3],
     brightness: f32,
-    scale: &crate::scale::RadialScale,
-) -> Belt {
-    let brightness_scale = brightness;
-    let particles = (0..count)
+}
+
+/// Scatter `spec.count` particles through the torus the spec describes.
+fn build_belt(spec: &BeltSpec, scale: &RadialScale) -> Belt {
+    let particles = (0..spec.count)
         .map(|index| {
             // Radius is biased toward the middle of the belt, which is roughly
             // how the real population is distributed.
-            let u = random_unit(seed, index, 0);
-            let v = random_unit(seed, index, 1);
+            let u = random_unit(spec.seed, index, 0);
+            let v = random_unit(spec.seed, index, 1);
             let bias = (u + v) * 0.5;
-            let radius = inner_au + (outer_au - inner_au) * bias;
+            let radius = spec.inner_au + (spec.outer_au - spec.inner_au) * bias;
 
-            let angle = random_unit(seed, index, 2) * std::f64::consts::TAU;
+            let angle = random_unit(spec.seed, index, 2) * std::f64::consts::TAU;
             // Two samples summed approximate a normal distribution, so the belt
             // is concentrated near the ecliptic with a scattered tail.
-            let height = (random_unit(seed, index, 3) + random_unit(seed, index, 4) - 1.0)
-                * thickness_au;
+            let height = (random_unit(spec.seed, index, 3) + random_unit(spec.seed, index, 4)
+                - 1.0)
+                * spec.thickness_au;
 
-            let position_au = DVec3::new(
-                radius * angle.cos(),
-                radius * angle.sin(),
-                height,
-            );
+            let position_au = DVec3::new(radius * angle.cos(), radius * angle.sin(), height);
             let scaled = scale.apply_to_position(position_au);
 
             // Faint at the edges, brighter through the middle.
@@ -172,16 +174,16 @@ fn build_belt(
 
             BeltParticle {
                 position: ecliptic_to_scene(scaled),
-                size: (0.0016 + 0.0022 * random_unit(seed, index, 5)) as f32,
-                brightness: (0.25 + 0.75 * brightness) * brightness_scale,
+                size: (0.0016 + 0.0022 * random_unit(spec.seed, index, 5)) as f32,
+                brightness: (0.25 + 0.75 * brightness) * spec.brightness,
             }
         })
         .collect();
 
     Belt {
-        name,
+        name: spec.name,
         particles,
-        color,
+        color: spec.color,
     }
 }
 
@@ -372,17 +374,19 @@ fn build_belts(config: &Config) -> Vec<Belt> {
     if config.bodies.asteroid_belt {
         // The main belt runs roughly 2.1 to 3.3 AU, between Mars and Jupiter.
         belts.push(build_belt(
-            "Asteroid Belt",
-            2.1,
-            3.3,
-            0.10,
-            BELT_PARTICLES,
-            0xA57E_201D,
-            [0.72, 0.66, 0.56],
-            // The real main belt is invisible from anywhere. Drawn dense
-            // and additive it piles up into a solid glowing ring that
-            // out-shouts the Sun, so it is kept to a suggestion.
-            0.16,
+            &BeltSpec {
+                name: "Asteroid Belt",
+                inner_au: 2.1,
+                outer_au: 3.3,
+                thickness_au: 0.10,
+                count: BELT_PARTICLES,
+                seed: 0xA57E_201D,
+                color: [0.72, 0.66, 0.56],
+                // The real main belt is invisible from anywhere. Drawn dense
+                // and additive it piles up into a solid glowing ring that
+                // out-shouts the Sun, so it is kept to a suggestion.
+                brightness: 0.16,
+            },
             orbit_scale,
         ));
     }
@@ -391,15 +395,17 @@ fn build_belts(config: &Config) -> Vec<Belt> {
         // 2:1 resonance at about 48 AU, and is far thicker than the main
         // belt.
         belts.push(build_belt(
-            "Kuiper Belt",
-            30.0,
-            48.0,
-            2.4,
-            (BELT_PARTICLES as f32 * 1.6) as u32,
-            0x4B1D_9E37,
-            [0.62, 0.70, 0.82],
-            // Spread over a far larger area, so it survives being brighter.
-            0.55,
+            &BeltSpec {
+                name: "Kuiper Belt",
+                inner_au: 30.0,
+                outer_au: 48.0,
+                thickness_au: 2.4,
+                count: KUIPER_PARTICLES,
+                seed: 0x4B1D_9E37,
+                color: [0.62, 0.70, 0.82],
+                // Spread over a far larger area, so it survives being brighter.
+                brightness: 0.55,
+            },
             orbit_scale,
         ));
     }
@@ -417,7 +423,14 @@ impl Scene {
     /// [`Scene::build_cached`] instead; this entry point serves one-shot
     /// callers — tests and screenshots — where a cache would be dead weight.
     pub fn build(config: &Config, lookup: &Lookup, epoch: JulianDate, aspect: f32) -> Self {
-        Self::assemble(config, lookup, epoch, aspect, config.camera.azimuth_deg, None)
+        Self::assemble(
+            config,
+            lookup,
+            epoch,
+            aspect,
+            config.camera.azimuth_deg,
+            None,
+        )
     }
 
     /// [`Scene::build`], but reusing the belts and orbit geometry held in
@@ -488,8 +501,8 @@ impl Scene {
             if planet == Planet::Earth && config.bodies.moon {
                 let moon_offset_au = ephemeris::geocentric_moon_position(epoch);
                 let offset = ecliptic_to_scene(
-                    orbit_scale.apply_to_position(position_au + moon_offset_au) -
-                        orbit_scale.apply_to_position(position_au),
+                    orbit_scale.apply_to_position(position_au + moon_offset_au)
+                        - orbit_scale.apply_to_position(position_au),
                 ) * MOON_DISTANCE_BOOST;
                 let moon_offset = if offset.length() < radius * 1.8 {
                     offset.normalize_or_zero() * radius * 1.8
@@ -551,9 +564,7 @@ fn orbit_points(elements: &ephemeris::Kepler, scale: &RadialScale) -> Arc<[Vec3]
         .map(|i| {
             let eccentric_anomaly = 360.0 * f64::from(i) / f64::from(ORBIT_SEGMENTS);
             ecliptic_to_scene(
-                scale.apply_to_position(
-                    elements.position_at_eccentric_anomaly(eccentric_anomaly),
-                ),
+                scale.apply_to_position(elements.position_at_eccentric_anomaly(eccentric_anomaly)),
             )
         })
         .collect()
@@ -574,7 +585,11 @@ fn body_fraction(elements: &ephemeris::Kepler) -> f32 {
 fn spin_orientation(data: &BodyData, epoch: JulianDate) -> Quat {
     let days = epoch.days_since_j2000();
     let period_days = data.rotation_period_hours / 24.0;
-    let spin = if period_days.abs() > f64::EPSILON {
+    // The threshold is a magnitude — a tenth of a second per rotation — not
+    // `f64::EPSILON`, which is relative spacing at 1.0 and means nothing as a
+    // "no rotation" cutoff. Every real body in the table is far above it.
+    const MIN_PERIOD_DAYS: f64 = 1e-6;
+    let spin = if period_days.abs() > MIN_PERIOD_DAYS {
         (std::f64::consts::TAU * days / period_days).rem_euclid(std::f64::consts::TAU)
     } else {
         0.0
@@ -585,6 +600,28 @@ fn spin_orientation(data: &BodyData, epoch: JulianDate) -> Quat {
     tilt * Quat::from_rotation_y(spin as f32)
 }
 
+/// `offset_y` measured from the *nearer* edge: it lifts the picture on a
+/// landscape screen and lowers it on a portrait one.
+///
+/// At a shallow tilt the near arc of the outermost orbit hangs well below the
+/// Sun, so a wide frame has to lift the picture to keep that arc on screen. A
+/// tall frame has the opposite problem — the system is small in it, and pinning
+/// the Sun near the top leaves the whole lower half empty, so the orrery hangs
+/// like a chandelier instead of sitting like a foundation.
+///
+/// Flipping below aspect 1 is not a chosen threshold; it is where the geometry
+/// changes sign. Bottom-aligned, the lowest planet lands 127 px over the edge at
+/// 4:3 and 78 px over at 5:4, clears by 6 px at exactly 1:1, and only improves
+/// from there. Square is the last shape with no room, so square is the boundary.
+fn vertical_offset(offset_y: f32, aspect: f32) -> f32 {
+    if aspect < 1.0 { -offset_y } else { offset_y }
+}
+
+/// The aspect floor for a degenerate viewport. A magnitude with a meaning —
+/// one pixel of width per thousand of height — where `f32::EPSILON` was the
+/// spacing of floats at 1.0 and no useful floor at all.
+const MIN_ASPECT: f32 = 1e-3;
+
 /// Place the camera so a chosen heliocentric radius lands on the left and right
 /// edges of the frame.
 ///
@@ -592,7 +629,9 @@ fn spin_orientation(data: &BodyData, epoch: JulianDate) -> Quat {
 /// no convergence budget, so there is nothing that can quietly give up and leave
 /// the picture wherever a loop happened to stop. The distance does not depend on
 /// the azimuth either, so circling the Sun cannot re-frame the scene — which is
-/// what `one_rotation_does_not_re_frame_the_scene` exists to hold.
+/// what `one_rotation_does_not_re_frame_the_scene` exists to hold. The azimuth
+/// itself is a parameter rather than read from the config, which is how the
+/// per-frame camera drift avoids mutating a clone of the whole `Config`.
 ///
 /// # The widest point of an orbit is not the one beside the Sun
 ///
@@ -617,28 +656,9 @@ fn spin_orientation(data: &BodyData, epoch: JulianDate) -> Quat {
 /// and Neptune leave the frame entirely — verified by rendering it. This is the
 /// perspective foreshortening an earlier comment here claimed no closed form
 /// could account for.
-/// `offset_y` measured from the *nearer* edge: it lifts the picture on a
-/// landscape screen and lowers it on a portrait one.
-///
-/// At a shallow tilt the near arc of the outermost orbit hangs well below the
-/// Sun, so a wide frame has to lift the picture to keep that arc on screen. A
-/// tall frame has the opposite problem — the system is small in it, and pinning
-/// the Sun near the top leaves the whole lower half empty, so the orrery hangs
-/// like a chandelier instead of sitting like a foundation.
-///
-/// Flipping below aspect 1 is not a chosen threshold; it is where the geometry
-/// changes sign. Bottom-aligned, the lowest planet lands 127 px over the edge at
-/// 4:3 and 78 px over at 5:4, clears by 6 px at exactly 1:1, and only improves
-/// from there. Square is the last shape with no room, so square is the boundary.
-fn vertical_offset(offset_y: f32, aspect: f32) -> f32 {
-    if aspect < 1.0 { -offset_y } else { offset_y }
-}
-
-/// The azimuth is a parameter rather than read from the config, which is how
-/// the per-frame camera drift avoids mutating a clone of the whole `Config`.
 fn frame_camera_with_azimuth(config: &Config, aspect: f32, azimuth_deg: f32) -> CameraState {
     let camera = &config.camera;
-    let aspect = aspect.max(f32::EPSILON);
+    let aspect = aspect.max(MIN_ASPECT);
 
     // The elevation is used exactly as configured. Nothing here adjusts it.
     //
@@ -686,7 +706,10 @@ fn frame_camera_with_azimuth(config: &Config, aspect: f32, azimuth_deg: f32) -> 
         // asking to move the picture would silently also resize it. Offsets are
         // fractions of the full viewport; normalised device coordinates span two
         // of those per axis.
-        lens_shift: Vec2::new(camera.offset_x * 2.0, vertical_offset(camera.offset_y, aspect) * 2.0),
+        lens_shift: Vec2::new(
+            camera.offset_x * 2.0,
+            vertical_offset(camera.offset_y, aspect) * 2.0,
+        ),
     }
 }
 
@@ -748,8 +771,7 @@ mod tests {
                 .map(|p| (*p - body.position).length())
                 .fold(f32::INFINITY, f32::min);
             // Within one segment's chord length of the ring.
-            let chord = 2.0 * std::f32::consts::PI * body.position.length()
-                / ORBIT_SEGMENTS as f32;
+            let chord = 2.0 * std::f32::consts::PI * body.position.length() / ORBIT_SEGMENTS as f32;
             assert!(
                 closest < chord * 1.5,
                 "{} is {closest} from its ring (chord {chord})",
@@ -820,15 +842,15 @@ mod tests {
         // Shape, width, height, lowest planet's clearance above the bottom edge
         // in pixels — negative meaning it hangs over.
         const GOLDENS: [(&str, u32, u32, f32); 7] = [
-            ("32:9",  5120, 1440, -838.0),
-            ("21:9",  3440, 1440,  -16.0),
-            ("16:9",  1920, 1080,  282.0),
-            ("16:10", 1920, 1200,  400.0),
-            ("3:2",   2256, 1504,  560.0),
-            ("4:3",   1600, 1200,  521.0),
+            ("32:9", 5120, 1440, -838.0),
+            ("21:9", 3440, 1440, -16.0),
+            ("16:9", 1920, 1080, 282.0),
+            ("16:10", 1920, 1200, 400.0),
+            ("3:2", 2256, 1504, 560.0),
+            ("4:3", 1600, 1200, 521.0),
             // Portrait alone anchors the Sun to the bottom, so the system sits
             // low with sky above rather than hanging from the top edge.
-            ("9:16",  1080, 1920,  237.0),
+            ("9:16", 1080, 1920, 237.0),
         ];
 
         for (shape, width, height, expected) in GOLDENS {
@@ -845,7 +867,11 @@ mod tests {
             // The Sun sits 23% from the nearer edge: the top in landscape, the
             // bottom in portrait.
             let sun_y = ndc(Vec3::ZERO).expect("the Sun in front of the camera").y;
-            let from_nearer_edge = if aspect < 1.0 { (1.0 + sun_y) / 2.0 } else { (1.0 - sun_y) / 2.0 };
+            let from_nearer_edge = if aspect < 1.0 {
+                (1.0 + sun_y) / 2.0
+            } else {
+                (1.0 - sun_y) / 2.0
+            };
             assert!(
                 (from_nearer_edge - 0.23).abs() < 0.003,
                 "{shape}: the Sun is {:.1}% from the nearer edge, not 23%",
@@ -932,8 +958,7 @@ mod tests {
                 };
 
                 // Halfway from the Sun towards the camera, in the plane.
-                let towards_camera =
-                    Vec3::new(scene.camera.eye.x, 0.0, scene.camera.eye.z) * 0.5;
+                let towards_camera = Vec3::new(scene.camera.eye.x, 0.0, scene.camera.eye.z) * 0.5;
                 let sun_y = ndc_y(Vec3::ZERO);
                 let near_y = ndc_y(towards_camera);
                 let far_y = ndc_y(-towards_camera);
@@ -984,7 +1009,9 @@ mod tests {
             (clip.w > 0.0).then(|| clip.truncate() / clip.w)
         };
 
-        let sun_y = ndc_of(Vec3::ZERO).expect("the Sun in front of the camera").y;
+        let sun_y = ndc_of(Vec3::ZERO)
+            .expect("the Sun in front of the camera")
+            .y;
 
         let outermost = scene.orbits.last().expect("an outermost orbit");
         let (mut visible_half_width, mut far_edge, mut near_arc) = (0.0f32, 0.0f32, 0.0f32);
@@ -1006,7 +1033,12 @@ mod tests {
                 "{what}: {actual:.3}, target {target:.3} +/- {tolerance}"
             );
         };
-        close((1.0 - sun_y) / 2.0, 0.230, 0.003, "Sun's distance from the top");
+        close(
+            (1.0 - sun_y) / 2.0,
+            0.230,
+            0.003,
+            "Sun's distance from the top",
+        );
         close(visible_half_width, 0.851, 0.02, "visible half-width");
         close(far_edge, 0.790, 0.02, "far edge above centre");
         close(near_arc, 0.902, 0.02, "near arc below centre");
@@ -1057,7 +1089,13 @@ mod tests {
                 (clip.w > 0.0).then(|| clip.truncate() / clip.w)
             };
 
-            for point in scene.orbits.last().expect("an outermost orbit").points.iter() {
+            for point in scene
+                .orbits
+                .last()
+                .expect("an outermost orbit")
+                .points
+                .iter()
+            {
                 if let Some(ndc) = ndc_of(*point) {
                     lowest_arc = lowest_arc.min(ndc.y);
                 }
@@ -1138,14 +1176,22 @@ mod tests {
                                 let t = std::f32::consts::TAU * i as f32 / 2048.0;
                                 let clip = view_projection
                                     * Vec3::new(s * t.cos(), 0.0, s * t.sin()).extend(1.0);
-                                if clip.w > 1e-6 { (clip.x / clip.w).abs() } else { 0.0 }
+                                if clip.w > 1e-6 {
+                                    (clip.x / clip.w).abs()
+                                } else {
+                                    0.0
+                                }
                             })
                             .fold(0.0f32, f32::max)
                     };
                     let (mut low, mut high) = (0.5, 500.0);
                     for _ in 0..50 {
                         let middle = 0.5 * (low + high);
-                        if widest(middle) < 1.0 { low = middle } else { high = middle }
+                        if widest(middle) < 1.0 {
+                            low = middle
+                        } else {
+                            high = middle
+                        }
                     }
                     let found = 0.5 * (low + high);
                     assert!(
@@ -1163,9 +1209,15 @@ mod tests {
     #[test]
     fn a_larger_frame_radius_pulls_the_camera_back() {
         let mut config = Config::default();
-        let near = Scene::build(&config, &Lookup::builtin(), EPOCH, 1.6).camera.eye.length();
+        let near = Scene::build(&config, &Lookup::builtin(), EPOCH, 1.6)
+            .camera
+            .eye
+            .length();
         config.camera.frame_radius_au *= 4.0;
-        let far = Scene::build(&config, &Lookup::builtin(), EPOCH, 1.6).camera.eye.length();
+        let far = Scene::build(&config, &Lookup::builtin(), EPOCH, 1.6)
+            .camera
+            .eye
+            .length();
         // The distance is linear in `scale(frame_radius_au)`, and the shipped
         // scale law is r^0.45, so four times the radius is 4^0.45 = 1.866x.
         let expected = near * 4.0_f32.powf(0.45);
@@ -1259,9 +1311,15 @@ mod tests {
         let first = Scene::build_cached(&config, &lookup, EPOCH, 1.6, 0.0, &mut cache);
         let second = Scene::build_cached(&config, &lookup, EPOCH, 1.6, 90.0, &mut cache);
 
-        assert!(Arc::ptr_eq(&first.belts, &second.belts), "belts were rebuilt");
+        assert!(
+            Arc::ptr_eq(&first.belts, &second.belts),
+            "belts were rebuilt"
+        );
         for (a, b) in first.orbits.iter().zip(&second.orbits) {
-            assert!(Arc::ptr_eq(&a.points, &b.points), "ring points were rebuilt");
+            assert!(
+                Arc::ptr_eq(&a.points, &b.points),
+                "ring points were rebuilt"
+            );
         }
         assert_eq!(first.belts_generation, second.belts_generation);
         assert_eq!(first.orbits_generation, second.orbits_generation);
@@ -1341,7 +1399,12 @@ mod tests {
     #[test]
     fn planets_advance_along_their_orbits_over_time() {
         let now = Scene::build(&Config::default(), &Lookup::builtin(), EPOCH, 1.6);
-        let later = Scene::build(&Config::default(), &Lookup::builtin(), JulianDate(EPOCH.0 + 30.0), 1.6);
+        let later = Scene::build(
+            &Config::default(),
+            &Lookup::builtin(),
+            JulianDate(EPOCH.0 + 30.0),
+            1.6,
+        );
         let mercury_now = now.bodies.iter().find(|b| b.name == "Mercury").unwrap();
         let mercury_later = later.bodies.iter().find(|b| b.name == "Mercury").unwrap();
         // Mercury's year is 88 days, so 30 days is a large fraction of an orbit.
@@ -1357,7 +1420,11 @@ mod tests {
                 "{} has a non-unit orientation",
                 body.name
             );
-            assert!(body.position.is_finite() && body.radius > 0.0, "{}", body.name);
+            assert!(
+                body.position.is_finite() && body.radius > 0.0,
+                "{}",
+                body.name
+            );
         }
     }
 }
@@ -1396,8 +1463,7 @@ mod epoch_sweep {
         let mut lowest = f32::MAX;
         for i in 0..48 {
             let phi = std::f32::consts::TAU * i as f32 / 48.0;
-            let point =
-                body.position + (camera.up * phi.cos() + forward * phi.sin()) * body.radius;
+            let point = body.position + (camera.up * phi.cos() + forward * phi.sin()) * body.radius;
             let clip = *view_projection * point.extend(1.0);
             if clip.w > 1e-6 {
                 lowest = lowest.min(clip.y / clip.w);

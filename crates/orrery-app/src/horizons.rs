@@ -53,8 +53,7 @@ pub fn cache_path() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
         .or_else(|| {
-            std::env::var_os("HOME")
-                .map(|home| PathBuf::from(home).join(".local").join("share"))
+            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local").join("share"))
         })?;
     Some(base.join("orrery").join("almanac.toml"))
 }
@@ -147,7 +146,9 @@ pub fn fetch(now: JulianDate) -> Result<Almanac> {
         retrieved: now.0,
         bodies,
     };
-    almanac.validate().context("Horizons returned implausible elements")?;
+    almanac
+        .validate()
+        .context("Horizons returned implausible elements")?;
     Ok(almanac)
 }
 
@@ -227,7 +228,10 @@ mod tests {
             retrieved: now.0 - 400.0,
             ..fresh.clone()
         };
-        assert!(needs_refresh(Some(&stale), now, 365.0), "older than the interval");
+        assert!(
+            needs_refresh(Some(&stale), now, 365.0),
+            "older than the interval"
+        );
 
         // Not stale by age, but its epochs no longer bracket the moment.
         assert!(
@@ -241,8 +245,16 @@ mod tests {
         let target = std::path::Path::new("/tmp/orrery-test/almanac.toml");
         let temporary = temp_path(target);
         assert_ne!(temporary, target);
-        assert_eq!(temporary.parent(), target.parent(), "rename must stay on one filesystem");
-        let name = temporary.file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(
+            temporary.parent(),
+            target.parent(),
+            "rename must stay on one filesystem"
+        );
+        let name = temporary
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
         assert!(
             name.ends_with(&format!(".{}", std::process::id())),
             "{name} should end with this process id, so concurrent per-output \
@@ -277,7 +289,10 @@ mod tests {
             .filter_map(|entry| entry.ok())
             .filter(|entry| entry.path() != path)
             .collect();
-        assert!(leftovers.is_empty(), "no temp files may remain: {leftovers:?}");
+        assert!(
+            leftovers.is_empty(),
+            "no temp files may remain: {leftovers:?}"
+        );
         let _ = std::fs::remove_dir_all(&directory);
     }
 
@@ -302,7 +317,12 @@ mod tests {
         let almanac = fetch(now).expect("fetch should succeed");
         for planet in Planet::ALL {
             let sets = almanac.sets_for(planet).expect("every planet present");
-            assert!(sets.len() >= 13, "{}: only {} epochs", planet.name(), sets.len());
+            assert!(
+                sets.len() >= 13,
+                "{}: only {} epochs",
+                planet.name(),
+                sets.len()
+            );
             assert!(
                 almanac.position(planet, now).is_some(),
                 "{} does not cover now",

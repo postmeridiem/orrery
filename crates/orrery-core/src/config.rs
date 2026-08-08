@@ -172,8 +172,11 @@ impl Default for Camera {
 pub struct Time {
     /// `"live"` tracks the system clock. `"fixed"` freezes at [`Time::date`].
     pub mode: TimeMode,
-    /// Starting date, `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM:SS`, UTC. Ignored in
-    /// live mode unless `speed` is non-default.
+    /// Starting date, `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM:SS`, UTC.
+    ///
+    /// When set, it is the starting epoch in *every* mode: fixed time freezes
+    /// there, and live time runs from there at [`Time::days_per_second`].
+    /// Unset, both modes start from the moment of launch.
     pub date: Option<String>,
     /// Simulated days per real second.
     ///
@@ -207,12 +210,13 @@ pub enum TimeMode {
 }
 
 impl Time {
-    /// The Julian Date this configuration starts from.
+    /// The Julian Date this configuration starts from: the configured date in
+    /// every mode, else the moment this is called — so fixed mode with no
+    /// date freezes at launch time.
     pub fn start_epoch(&self) -> Result<JulianDate, ConfigError> {
-        match (&self.date, self.mode) {
-            (Some(text), _) => parse_date(text),
-            (None, TimeMode::Live) => Ok(JulianDate::now()),
-            (None, TimeMode::Fixed) => Ok(JulianDate::now()),
+        match &self.date {
+            Some(text) => parse_date(text),
+            None => Ok(JulianDate::now()),
         }
     }
 }
@@ -226,10 +230,26 @@ fn parse_date(text: &str) -> Result<JulianDate, ConfigError> {
     };
 
     let mut fields = date_part.split('-');
-    let year: i32 = fields.next().ok_or_else(invalid)?.parse().map_err(|_| invalid())?;
-    let month: u32 = fields.next().ok_or_else(invalid)?.parse().map_err(|_| invalid())?;
-    let day: u32 = fields.next().ok_or_else(invalid)?.parse().map_err(|_| invalid())?;
-    if fields.next().is_some() || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+    let year: i32 = fields
+        .next()
+        .ok_or_else(invalid)?
+        .parse()
+        .map_err(|_| invalid())?;
+    let month: u32 = fields
+        .next()
+        .ok_or_else(invalid)?
+        .parse()
+        .map_err(|_| invalid())?;
+    let day: u32 = fields
+        .next()
+        .ok_or_else(invalid)?
+        .parse()
+        .map_err(|_| invalid())?;
+    if fields.next().is_some()
+        || !(1..=12).contains(&month)
+        || day < 1
+        || day > days_in(year, month)
+    {
         return Err(invalid());
     }
 
@@ -237,7 +257,11 @@ fn parse_date(text: &str) -> Result<JulianDate, ConfigError> {
         None => 0.0,
         Some(t) => {
             let mut hms = t.split(':');
-            let hours: f64 = hms.next().ok_or_else(invalid)?.parse().map_err(|_| invalid())?;
+            let hours: f64 = hms
+                .next()
+                .ok_or_else(invalid)?
+                .parse()
+                .map_err(|_| invalid())?;
             let minutes: f64 = hms.next().unwrap_or("0").parse().map_err(|_| invalid())?;
             let seconds: f64 = hms.next().unwrap_or("0").parse().map_err(|_| invalid())?;
             if hours >= 24.0 || minutes >= 60.0 || seconds >= 60.0 {
@@ -252,6 +276,20 @@ fn parse_date(text: &str) -> Result<JulianDate, ConfigError> {
         month,
         day as f64 + day_fraction,
     ))
+}
+
+/// Days in a Gregorian month. Without this, `2026-02-31` would be accepted
+/// and quietly rolled into March by the calendar arithmetic downstream.
+fn days_in(year: i32, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+            if leap { 29 } else { 28 }
+        }
+        _ => 0,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -384,16 +422,25 @@ impl Config {
             return Err(ConfigError::Range("camera.elevation_deg", "-90 to 90"));
         }
         if !(self.camera.frame_radius_au.is_finite() && self.camera.frame_radius_au > 0.0) {
-            return Err(ConfigError::Range("camera.frame_radius_au", "greater than 0"));
+            return Err(ConfigError::Range(
+                "camera.frame_radius_au",
+                "greater than 0",
+            ));
         }
         if !(0.0..=1.0).contains(&self.orbits.opacity) {
             return Err(ConfigError::Range("orbits.opacity", "0.0 to 1.0"));
         }
         if !(0.0..=1.0).contains(&self.lighting.night_brightness) {
-            return Err(ConfigError::Range("lighting.night_brightness", "0.0 to 1.0"));
+            return Err(ConfigError::Range(
+                "lighting.night_brightness",
+                "0.0 to 1.0",
+            ));
         }
         if !(0.0..=1.0).contains(&self.lighting.night_saturation) {
-            return Err(ConfigError::Range("lighting.night_saturation", "0.0 to 1.0"));
+            return Err(ConfigError::Range(
+                "lighting.night_saturation",
+                "0.0 to 1.0",
+            ));
         }
         if !(0.0..=3.0).contains(&self.lighting.day_saturation) {
             return Err(ConfigError::Range("lighting.day_saturation", "0.0 to 3.0"));
@@ -402,10 +449,52 @@ impl Config {
             return Err(ConfigError::Range("lighting.sun_intensity", "0.0 to 100.0"));
         }
         if !(0.0..=10_080.0).contains(&self.camera.rotation_period_minutes) {
-            return Err(ConfigError::Range("camera.rotation_period_minutes", "0 to 10080"));
+            return Err(ConfigError::Range(
+                "camera.rotation_period_minutes",
+                "0 to 10080",
+            ));
         }
         if !(1.0..=3650.0).contains(&self.ephemeris.refresh_days) {
             return Err(ConfigError::Range("ephemeris.refresh_days", "1 to 3650"));
+        }
+        if !(1..=240).contains(&self.render.fps) {
+            return Err(ConfigError::Range("render.fps", "1 to 240"));
+        }
+        if !self.camera.azimuth_deg.is_finite() {
+            return Err(ConfigError::Range("camera.azimuth_deg", "finite"));
+        }
+        // The offsets are fractions of the viewport; a whole viewport in
+        // either direction already moves the picture entirely off screen.
+        if !(-1.0..=1.0).contains(&self.camera.offset_x) {
+            return Err(ConfigError::Range("camera.offset_x", "-1.0 to 1.0"));
+        }
+        if !(-1.0..=1.0).contains(&self.camera.offset_y) {
+            return Err(ConfigError::Range("camera.offset_y", "-1.0 to 1.0"));
+        }
+        // These three go straight to the shader, where NaN would paint the
+        // whole sky with it. `contains` on a range rejects NaN by itself for
+        // the bounded ones; the explicit bound here also keeps "brightness
+        // 1000000" from being an accepted way to white out the screen.
+        if !(0.0..=10.0).contains(&self.sky.star_brightness) {
+            return Err(ConfigError::Range("sky.star_brightness", "0.0 to 10.0"));
+        }
+        if !(0.0..=10.0).contains(&self.sky.milky_way) {
+            return Err(ConfigError::Range("sky.milky_way", "0.0 to 10.0"));
+        }
+        if !(0.0..=1.0).contains(&self.sky.constellation_opacity) {
+            return Err(ConfigError::Range(
+                "sky.constellation_opacity",
+                "0.0 to 1.0",
+            ));
+        }
+        // A century per second laps Neptune's orbit twice a minute; anything
+        // beyond that is surely a typo, and NaN or infinity would poison the
+        // epoch arithmetic for good.
+        if !(self.time.days_per_second.is_finite() && self.time.days_per_second.abs() <= 36_500.0) {
+            return Err(ConfigError::Range(
+                "time.days_per_second",
+                "-36500 to 36500",
+            ));
         }
         Ok(())
     }
@@ -488,7 +577,10 @@ mod tests {
         .unwrap();
         assert_eq!(
             config.scale.orbit,
-            RadialScale::Logarithmic { units_per_au: 1.0, softness: 0.4 }
+            RadialScale::Logarithmic {
+                units_per_au: 1.0,
+                softness: 0.4
+            }
         );
         let text = toml::to_string(&config).unwrap();
         assert_eq!(Config::from_toml(&text).unwrap(), config);
@@ -509,9 +601,46 @@ mod tests {
             "[camera]\nframe_radius_au = 0.0\n",
             "[orbits]\nopacity = 1.5\n",
             "[scale.orbit]\nlaw = \"power\"\nunits_per_au = 1.0\nexponent = -1.0\n",
+            "[render]\nfps = 0\n",
+            "[render]\nfps = 1000\n",
+            "[camera]\noffset_y = 2.0\n",
+            "[camera]\nazimuth_deg = inf\n",
+            "[sky]\nstar_brightness = nan\n",
+            "[sky]\nmilky_way = -1.0\n",
+            "[time]\ndays_per_second = nan\n",
+            "[time]\ndays_per_second = 1e9\n",
         ] {
             assert!(Config::from_toml(bad).is_err(), "accepted {bad:?}");
         }
+    }
+
+    /// `[scale.orbit]` is the config section most likely to be hand-edited,
+    /// and — as an internally tagged enum — the one where derived serde
+    /// silently ignored unknown keys. The hand-written `Deserialize` closes
+    /// that: a typo is an error naming the stray key, and a parameter left
+    /// over from a different law is called out rather than dropped.
+    #[test]
+    fn scale_orbit_rejects_stray_and_misplaced_keys() {
+        let typo = "[scale.orbit]\nlaw = \"power\"\nunits_per_au = 1.0\nexpoennt = 0.45\n";
+        let err = Config::from_toml(typo).unwrap_err();
+        assert!(
+            err.to_string().contains("expoennt"),
+            "typo not named: {err}"
+        );
+
+        let leftover = "[scale.orbit]\nlaw = \"linear\"\nunits_per_au = 1.0\nexponent = 0.45\n";
+        let err = Config::from_toml(leftover).unwrap_err();
+        assert!(
+            err.to_string().contains("exponent") && err.to_string().contains("linear"),
+            "leftover key not explained: {err}"
+        );
+
+        let missing = "[scale.orbit]\nlaw = \"power\"\nunits_per_au = 1.0\n";
+        let err = Config::from_toml(missing).unwrap_err();
+        assert!(
+            err.to_string().contains("exponent"),
+            "missing key not named: {err}"
+        );
     }
 
     #[test]
@@ -537,9 +666,21 @@ mod tests {
             "2026-08-03-01",
             "2026-08-03T25:00:00",
             "2026-08-03T12:61:00",
+            // Days that don't exist in their month must not roll over into
+            // the next one.
+            "2026-02-29",
+            "2026-02-31",
+            "2026-04-31",
+            "2100-02-29", // divisible by 100: not a leap year
         ] {
             assert!(parse_date(bad).is_err(), "accepted {bad:?}");
         }
+        // ...while genuine leap days parse.
+        assert!(parse_date("2024-02-29").is_ok());
+        assert!(
+            parse_date("2000-02-29").is_ok(),
+            "divisible by 400 is a leap year"
+        );
     }
 
     #[test]
@@ -560,8 +701,7 @@ mod shipped_config {
     #[test]
     fn shipped_file_parses_and_equals_the_defaults() {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/orrery.toml");
-        let text = std::fs::read_to_string(path)
-            .unwrap_or_else(|e| panic!("reading {path}: {e}"));
+        let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("reading {path}: {e}"));
         let from_file = Config::from_toml(&text).expect("shipped config must be valid");
         assert_eq!(
             from_file,

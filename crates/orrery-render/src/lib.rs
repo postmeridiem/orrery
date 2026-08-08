@@ -161,7 +161,11 @@ struct CachedSky {
 /// rendered — the point at which reprojection would start to soften it.
 /// Compared through the cross product, whose length is sin(angle): at these
 /// tiny angles a dot-product comparison would drown in f32 rounding at 1.0.
-fn sky_refresh_due(cached: Option<&CachedSky>, fingerprint: &SkyFingerprint, forward: Vec3) -> bool {
+fn sky_refresh_due(
+    cached: Option<&CachedSky>,
+    fingerprint: &SkyFingerprint,
+    forward: Vec3,
+) -> bool {
     let Some(cached) = cached else { return true };
     if cached.fingerprint != *fingerprint {
         return true;
@@ -586,8 +590,7 @@ impl Renderer {
 
         let instances_capacity = 32;
         let instances = new_instance_buffer(device, instances_capacity);
-        let instances_bind_group =
-            new_instance_bind_group(device, &instances_layout, &instances);
+        let instances_bind_group = new_instance_bind_group(device, &instances_layout, &instances);
 
         // Eight rings of 2·512 + 2 vertices; the next power of two above that,
         // so the default scene never reallocates.
@@ -650,24 +653,22 @@ impl Renderer {
             bind_group_layouts: &[Some(&globals_layout), Some(&instances_layout)],
             immediate_size: 0,
         });
-        let globals_only_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("globals only"),
-                bind_group_layouts: &[Some(&globals_layout)],
-                immediate_size: 0,
-            });
+        let globals_only_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("globals only"),
+            bind_group_layouts: &[Some(&globals_layout)],
+            immediate_size: 0,
+        });
         let orbit_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("orbit"),
                 bind_group_layouts: &[Some(&globals_layout), Some(&orbit_params_layout)],
                 immediate_size: 0,
             });
-        let blit_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("blit"),
-                bind_group_layouts: &[Some(&blit_layout)],
-                immediate_size: 0,
-            });
+        let blit_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("blit"),
+            bind_group_layouts: &[Some(&blit_layout)],
+            immediate_size: 0,
+        });
         let tonemap_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("tonemap"),
@@ -696,28 +697,27 @@ impl Renderer {
         // The fullscreen triangle has no geometric edges, so under MSAA every
         // sample of a pixel shades identically anyway — single-sampling the
         // cache loses nothing.
-        let sky_refresh_pipeline =
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("sky refresh"),
-                layout: Some(&globals_only_layout),
-                vertex: wgpu::VertexState {
-                    module: &sky_shader,
-                    entry_point: Some("vertex_main"),
-                    compilation_options: Default::default(),
-                    buffers: &[],
-                },
-                primitive: wgpu::PrimitiveState::default(),
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState::default(),
-                fragment: Some(wgpu::FragmentState {
-                    module: &sky_shader,
-                    entry_point: Some("fragment_main"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(HDR_FORMAT.into())],
-                }),
-                multiview_mask: None,
-                cache: None,
-            });
+        let sky_refresh_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("sky refresh"),
+            layout: Some(&globals_only_layout),
+            vertex: wgpu::VertexState {
+                module: &sky_shader,
+                entry_point: Some("vertex_main"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &sky_shader,
+                entry_point: Some("fragment_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(HDR_FORMAT.into())],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
 
         let sky_present_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -725,35 +725,34 @@ impl Renderer {
                 bind_group_layouts: &[Some(&globals_layout), Some(&sky_present_layout)],
                 immediate_size: 0,
             });
-        let sky_present_pipeline =
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("sky present"),
-                layout: Some(&sky_present_pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: &sky_shader,
-                    entry_point: Some("vertex_main"),
-                    compilation_options: Default::default(),
-                    buffers: &[],
-                },
-                primitive: wgpu::PrimitiveState::default(),
-                // The sky is behind everything and occludes nothing.
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: DEPTH_FORMAT,
-                    depth_write_enabled: Some(false),
-                    depth_compare: Some(wgpu::CompareFunction::Always),
-                    stencil: wgpu::StencilState::default(),
-                    bias: wgpu::DepthBiasState::default(),
-                }),
-                multisample,
-                fragment: Some(wgpu::FragmentState {
-                    module: &sky_shader,
-                    entry_point: Some("fragment_present"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(HDR_FORMAT.into())],
-                }),
-                multiview_mask: None,
-                cache: None,
-            });
+        let sky_present_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("sky present"),
+            layout: Some(&sky_present_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &sky_shader,
+                entry_point: Some("vertex_main"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            // The sky is behind everything and occludes nothing.
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Always),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample,
+            fragment: Some(wgpu::FragmentState {
+                module: &sky_shader,
+                entry_point: Some("fragment_present"),
+                compilation_options: Default::default(),
+                targets: &[Some(HDR_FORMAT.into())],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
 
         let body_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("bodies"),
@@ -906,12 +905,11 @@ impl Renderer {
             "constellation_fragment",
         );
 
-        let belt_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("belt"),
-                bind_group_layouts: &[Some(&globals_layout), Some(&belt_layout)],
-                immediate_size: 0,
-            });
+        let belt_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("belt"),
+            bind_group_layouts: &[Some(&globals_layout), Some(&belt_layout)],
+            immediate_size: 0,
+        });
         let belt_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("belt"),
             layout: Some(&belt_pipeline_layout),
@@ -1080,7 +1078,8 @@ impl Renderer {
         }
     }
 
-    /// Upload the star catalogue, constellation figures and deep-sky objects.
+    /// Upload the star catalogue and constellation figures. (The catalogue's
+    /// deep-sky objects are not currently drawn — see `data/SOURCES.md`.)
     ///
     /// Done once: this data is fixed, so the buffers are built at start-up and
     /// only the magnitude cut-off is applied here.
@@ -1106,8 +1105,13 @@ impl Renderer {
         // Sized for the whole catalogue; only the visible figures are ever
         // written into it.
         let segment_capacity: usize = figures.iter().map(Vec::len).sum();
-        let segments = vec![GpuSegment { endpoint_a: [0.0; 4], endpoint_b: [0.0; 4] };
-            segment_capacity.max(1)];
+        let segments = vec![
+            GpuSegment {
+                endpoint_a: [0.0; 4],
+                endpoint_b: [0.0; 4]
+            };
+            segment_capacity.max(1)
+        ];
 
         log::info!(
             "sky: {} stars to magnitude {}, {} constellation segments",
@@ -1197,8 +1201,10 @@ impl Renderer {
                 let orient = |v: glam::Vec3| {
                     glam::Vec3::new(v.x * cos + v.z * sin, v.y, -v.x * sin + v.z * cos)
                 };
-                let oriented: Vec<(glam::Vec3, glam::Vec3)> =
-                    figure.iter().map(|(a, b)| (orient(*a), orient(*b))).collect();
+                let oriented: Vec<(glam::Vec3, glam::Vec3)> = figure
+                    .iter()
+                    .map(|(a, b)| (orient(*a), orient(*b)))
+                    .collect();
                 orrery_core::sky::figure_is_visible(
                     &oriented,
                     forward,
@@ -1336,8 +1342,9 @@ impl Renderer {
         self.select_visible_figures(queue, scene);
 
         let targets = self.targets.as_ref().expect("ensured above");
-        let mut encoder =
-            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("frame"),
+        });
 
         if refresh_sky {
             self.sky_refresh_pass(&mut encoder, targets);
@@ -1471,9 +1478,7 @@ impl Renderer {
         // The belts are byte-identical from frame to frame until the config
         // changes, so a generation already on the GPU is simply kept there.
         // Generation 0 marks an uncached scene and never matches.
-        if scene.belts_generation != 0
-            && scene.belts_generation == self.uploaded_belts_generation
-        {
+        if scene.belts_generation != 0 && scene.belts_generation == self.uploaded_belts_generation {
             return;
         }
 
@@ -1542,9 +1547,8 @@ impl Renderer {
             return;
         }
 
-        let mut vertices = Vec::with_capacity(
-            scene.orbits.iter().map(|r| r.points.len() * 2 + 2).sum(),
-        );
+        let mut vertices =
+            Vec::with_capacity(scene.orbits.iter().map(|r| r.points.len() * 2 + 2).sum());
         self.orbit_ranges.clear();
         pack_orbit_vertices(&scene.orbits, &mut vertices, &mut self.orbit_ranges);
         self.uploaded_orbits_generation = scene.orbits_generation;
@@ -1974,7 +1978,7 @@ impl Targets {
         // collapse to nothing.
         let bloom_width = (width / 2).max(1);
         let bloom_height = (height / 2).max(1);
-        let mip_count = (bloom_width.min(bloom_height).max(1).ilog2()).min(MAX_BLOOM_MIPS).max(1);
+        let mip_count = (bloom_width.min(bloom_height).max(1).ilog2()).clamp(1, MAX_BLOOM_MIPS);
 
         let bloom_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("bloom chain"),
@@ -2116,7 +2120,11 @@ mod tests {
 
         // Every vertex's neighbour is the next point, wrapping at the end.
         let first_ring = &vertices[0..16];
-        assert_eq!(first_ring[14].neighbour, [0.0, 0.0, 0.0], "last point wraps to first");
+        assert_eq!(
+            first_ring[14].neighbour,
+            [0.0, 0.0, 0.0],
+            "last point wraps to first"
+        );
     }
 
     fn fingerprint() -> SkyFingerprint {
@@ -2161,9 +2169,7 @@ mod tests {
         // Half a pixel at this fov and height is ~3.1e-4 radians. A tenth of
         // that must not refresh; three times it must.
         let pixel = fp.fov_y_radians / fp.height as f32;
-        let turned = |angle: f32| {
-            Vec3::new(angle.sin(), 0.0, -angle.cos()).normalize()
-        };
+        let turned = |angle: f32| Vec3::new(angle.sin(), 0.0, -angle.cos()).normalize();
         assert!(
             !sky_refresh_due(Some(&cached(forward)), &fp, turned(pixel * 0.05)),
             "a twentieth of a pixel of drift must reuse the cache"
@@ -2197,6 +2203,44 @@ mod tests {
             (20..=100).contains(&refreshes),
             "{refreshes} refreshes in 300 frames; expected roughly one in five"
         );
+    }
+
+    /// `appearance` dispatches on body *names*. A rename in `orrery-core`
+    /// would silently fall through to the airless-rock default — Jupiter
+    /// quietly becoming a rock — so every drawn body is pinned to the surface
+    /// it is supposed to get.
+    #[test]
+    fn every_drawn_body_gets_its_intended_surface() {
+        let expected: &[(&str, SurfaceKind, bool)] = &[
+            ("Sun", SurfaceKind::Sun, false),
+            ("Mercury", SurfaceKind::Rocky, false),
+            ("Venus", SurfaceKind::Rocky, true),
+            ("Earth", SurfaceKind::Earthlike, true),
+            ("Moon", SurfaceKind::Rocky, false),
+            ("Mars", SurfaceKind::Rocky, true),
+            ("Jupiter", SurfaceKind::GasGiant, true),
+            ("Saturn", SurfaceKind::GasGiant, true),
+            ("Uranus", SurfaceKind::IceGiant, true),
+            ("Neptune", SurfaceKind::IceGiant, true),
+        ];
+        for (name, kind, has_atmosphere) in expected {
+            let (got, atmosphere) = appearance(name);
+            assert_eq!(got, *kind, "{name} got the wrong surface synthesis");
+            assert_eq!(
+                atmosphere > 0.0,
+                *has_atmosphere,
+                "{name}: atmosphere rim {atmosphere}"
+            );
+        }
+        // And the names above are the real ones: every body the scene can
+        // produce must appear in the table, so a rename cannot slip past.
+        for planet in orrery_core::scene::DRAWN_PLANETS {
+            assert!(
+                expected.iter().any(|(name, ..)| *name == planet.name()),
+                "{} is drawn but untested",
+                planet.name()
+            );
+        }
     }
 
     #[test]

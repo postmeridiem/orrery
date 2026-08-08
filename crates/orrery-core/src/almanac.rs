@@ -11,9 +11,11 @@
 //! the propagation interval is then at most a couple of weeks rather than
 //! decades, the perturbations barely have time to accumulate.
 //!
-//! Measured against Horizons across a full year, worst-case heliocentric
-//! direction error falls from 0.108° to 5.0e-5° — about 0.18 arcseconds. See
-//! `tests/almanac_accuracy.rs`.
+//! Measured against Horizons state vectors at four dates across the bundled
+//! almanac's year (`tests/almanac_accuracy.rs`, which prints the numbers),
+//! worst-case heliocentric direction error falls from 0.074° to 2.2e-5° —
+//! 0.079 arcseconds. The tables' own worst case over their full 1990–2044
+//! validity span is a little higher, 0.11° (`ephemeris.rs` tests).
 //!
 //! One annual network request per body covers a whole year, because Horizons
 //! returns every requested epoch in a single response.
@@ -211,13 +213,18 @@ pub fn parse_horizons_elements(text: &str) -> Result<Vec<Osculating>, AlmanacErr
     // Records are delimited by the epoch line, so a record is complete when the
     // next epoch line arrives or the block ends.
     let flush = |epoch: &mut Option<f64>,
-                     fields: &mut BTreeMap<&str, f64>,
-                     sets: &mut Vec<Osculating>|
+                 fields: &mut BTreeMap<&str, f64>,
+                 sets: &mut Vec<Osculating>|
      -> Result<(), AlmanacError> {
         let Some(epoch) = epoch.take() else {
             return Ok(());
         };
-        let get = |key: &str| fields.get(key).copied().ok_or(AlmanacError::MissingField(key.to_owned()));
+        let get = |key: &str| {
+            fields
+                .get(key)
+                .copied()
+                .ok_or(AlmanacError::MissingField(key.to_owned()))
+        };
         sets.push(Osculating {
             epoch,
             a: get("A")?,
@@ -352,7 +359,7 @@ $$EOE
         assert!((first.mean_anomaly - 276.141_716_935_626_3).abs() < 1e-10);
         assert!((first.mean_motion - 0.033_422_322_341_776_65).abs() < 1e-15);
 
-        assert_eq!(sets[1].epoch, 2_461_071.9375);
+        assert_eq!(sets[1].epoch, 2_461_071.937_5);
     }
 
     /// `W =` and `N =` are padded, and `A =` shares a prefix with `AD=`. A
@@ -394,11 +401,15 @@ $$EOE
     /// `D`-exponents — the error would be a baffling `MissingField` instead.
     #[test]
     fn names_the_field_when_a_required_value_is_unparseable() {
-        let doctored = SATURN_RESPONSE.replace("EC= 5.535357040578952E-02", "EC= 5.535357040578952D-02");
+        let doctored =
+            SATURN_RESPONSE.replace("EC= 5.535357040578952E-02", "EC= 5.535357040578952D-02");
         match parse_horizons_elements(&doctored) {
             Err(AlmanacError::UnparseableValue { key, value }) => {
                 assert_eq!(key, "EC");
-                assert!(value.contains("D-02"), "the offending token is quoted: {value:?}");
+                assert!(
+                    value.contains("D-02"),
+                    "the offending token is quoted: {value:?}"
+                );
             }
             other => panic!("expected UnparseableValue for EC, got {other:?}"),
         }
@@ -419,11 +430,15 @@ $$EOE
     fn nearest_picks_the_closest_epoch() {
         let almanac = saturn_almanac();
         // Just after the first epoch.
-        let near_first = almanac.nearest(Planet::Saturn, JulianDate(2_461_045.0)).unwrap();
+        let near_first = almanac
+            .nearest(Planet::Saturn, JulianDate(2_461_045.0))
+            .unwrap();
         assert_eq!(near_first.epoch, 2_461_041.5);
         // Just before the second.
-        let near_second = almanac.nearest(Planet::Saturn, JulianDate(2_461_070.0)).unwrap();
-        assert_eq!(near_second.epoch, 2_461_071.9375);
+        let near_second = almanac
+            .nearest(Planet::Saturn, JulianDate(2_461_070.0))
+            .unwrap();
+        assert_eq!(near_second.epoch, 2_461_071.937_5);
     }
 
     #[test]
@@ -431,9 +446,13 @@ $$EOE
         // Switching from one element set to the next must not make the planet
         // jump, or the wallpaper would visibly twitch once a month.
         let almanac = saturn_almanac();
-        let midpoint = (2_461_041.5 + 2_461_071.9375) / 2.0;
-        let before = almanac.position(Planet::Saturn, JulianDate(midpoint - 1e-4)).unwrap();
-        let after = almanac.position(Planet::Saturn, JulianDate(midpoint + 1e-4)).unwrap();
+        let midpoint = (2_461_041.5 + 2_461_071.937_5) / 2.0;
+        let before = almanac
+            .position(Planet::Saturn, JulianDate(midpoint - 1e-4))
+            .unwrap();
+        let after = almanac
+            .position(Planet::Saturn, JulianDate(midpoint + 1e-4))
+            .unwrap();
         let separation = (before.normalize().dot(after.normalize()).clamp(-1.0, 1.0))
             .acos()
             .to_degrees();
@@ -459,13 +478,29 @@ $$EOE
     #[test]
     fn coverage_is_bounded() {
         let almanac = saturn_almanac();
-        assert!(almanac.position(Planet::Saturn, JulianDate(2_461_050.0)).is_some());
+        assert!(
+            almanac
+                .position(Planet::Saturn, JulianDate(2_461_050.0))
+                .is_some()
+        );
         // Far outside the epoch range, the almanac must decline rather than
         // extrapolate, so the built-in tables can take over.
-        assert!(almanac.position(Planet::Saturn, JulianDate(2_462_000.0)).is_none());
-        assert!(almanac.position(Planet::Saturn, JulianDate(2_460_000.0)).is_none());
+        assert!(
+            almanac
+                .position(Planet::Saturn, JulianDate(2_462_000.0))
+                .is_none()
+        );
+        assert!(
+            almanac
+                .position(Planet::Saturn, JulianDate(2_460_000.0))
+                .is_none()
+        );
         // A body it knows nothing about is always declined.
-        assert!(almanac.position(Planet::Mars, JulianDate(2_461_050.0)).is_none());
+        assert!(
+            almanac
+                .position(Planet::Mars, JulianDate(2_461_050.0))
+                .is_none()
+        );
     }
 
     #[test]

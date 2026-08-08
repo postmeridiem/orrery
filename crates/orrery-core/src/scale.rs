@@ -14,13 +14,23 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::bodies::AU_KM;
+/// Earth's equatorial radius in km, the reference for [`BodyScale`]. Taken
+/// from the body table rather than restated, so one physical constant has one
+/// home.
+const EARTH_RADIUS_KM: f64 = crate::bodies::data(crate::ephemeris::Planet::Earth).radius_km;
 
-/// Earth's equatorial radius in km, the reference for [`BodyScale`].
-const EARTH_RADIUS_KM: f64 = 6_378.1;
+/// The floor below which a heliocentric distance is treated as "at the Sun".
+/// A magnitude, unlike `f64::EPSILON` — which is relative spacing at 1.0, not
+/// a smallness threshold. 1e-12 AU is a sixth of a millimetre.
+const NEGLIGIBLE_AU: f64 = 1e-12;
 
 /// How orbital distance in AU becomes distance in scene units.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+///
+/// `Deserialize` is written by hand below: serde does not honour
+/// `deny_unknown_fields` on internally tagged enums, so the derived form let
+/// `[scale.orbit]` silently swallow typos and leftover keys — the one section
+/// of the config that broke the promise in [`crate::config`].
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 #[serde(tag = "law", rename_all = "snake_case")]
 pub enum RadialScale {
     /// True to scale. Honest, and unusable unless you are framing the inner
@@ -49,6 +59,72 @@ impl Default for RadialScale {
     }
 }
 
+impl<'de> Deserialize<'de> for RadialScale {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error;
+
+        /// The raw shape, which — being a struct — *does* honour
+        /// `deny_unknown_fields`, so `expoennt = 0.45` is an error naming the
+        /// stray key rather than a silently applied default.
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields, rename_all = "snake_case")]
+        struct Raw {
+            law: Law,
+            units_per_au: f64,
+            exponent: Option<f64>,
+            softness: Option<f64>,
+        }
+        #[derive(Deserialize, Clone, Copy)]
+        #[serde(rename_all = "snake_case")]
+        enum Law {
+            Linear,
+            Power,
+            Logarithmic,
+        }
+
+        let raw = Raw::deserialize(deserializer)?;
+        // A parameter belonging to a different law is a mistake worth naming:
+        // a leftover `exponent` under `law = "linear"` almost certainly means
+        // the law was changed and the intent did not follow.
+        let forbid = |value: Option<f64>, key: &str, law: &str| match value {
+            None => Ok(()),
+            Some(_) => Err(D::Error::custom(format!(
+                "`{key}` does not apply to law = \"{law}\""
+            ))),
+        };
+        match raw.law {
+            Law::Linear => {
+                forbid(raw.exponent, "exponent", "linear")?;
+                forbid(raw.softness, "softness", "linear")?;
+                Ok(RadialScale::Linear {
+                    units_per_au: raw.units_per_au,
+                })
+            }
+            Law::Power => {
+                forbid(raw.softness, "softness", "power")?;
+                Ok(RadialScale::Power {
+                    units_per_au: raw.units_per_au,
+                    exponent: raw
+                        .exponent
+                        .ok_or_else(|| D::Error::custom("law = \"power\" needs `exponent`"))?,
+                })
+            }
+            Law::Logarithmic => {
+                forbid(raw.exponent, "exponent", "logarithmic")?;
+                Ok(RadialScale::Logarithmic {
+                    units_per_au: raw.units_per_au,
+                    softness: raw.softness.ok_or_else(|| {
+                        D::Error::custom("law = \"logarithmic\" needs `softness`")
+                    })?,
+                })
+            }
+        }
+    }
+}
+
 impl RadialScale {
     /// Map a heliocentric distance in AU to scene units.
     ///
@@ -66,7 +142,9 @@ impl RadialScale {
                 units_per_au,
                 softness,
             } => {
-                let s = softness.max(f64::EPSILON);
+                // `validate` rejects non-positive softness; this floor is
+                // insurance for direct construction, not a correction.
+                let s = softness.max(NEGLIGIBLE_AU);
                 units_per_au * s * (1.0 + r / s).ln()
             }
         }
@@ -75,7 +153,7 @@ impl RadialScale {
     /// Rescale a heliocentric position, preserving its direction exactly.
     pub fn apply_to_position(&self, position_au: glam::DVec3) -> glam::DVec3 {
         let r = position_au.length();
-        if r <= f64::EPSILON {
+        if r <= NEGLIGIBLE_AU {
             return glam::DVec3::ZERO;
         }
         position_au * (self.apply(r) / r)
@@ -96,7 +174,9 @@ impl RadialScale {
             RadialScale::Power { exponent, .. } if !(exponent.is_finite() && exponent > 0.0) => {
                 Err(ScaleError::Exponent(exponent))
             }
-            RadialScale::Logarithmic { softness, .. } if !(softness.is_finite() && softness > 0.0) => {
+            RadialScale::Logarithmic { softness, .. }
+                if !(softness.is_finite() && softness > 0.0) =>
+            {
                 Err(ScaleError::Softness(softness))
             }
             _ => Ok(()),
@@ -144,13 +224,6 @@ impl BodyScale {
         self.apply(radius_km) * self.sun_multiplier
     }
 
-    /// True, uncompressed radius in scene units under a given orbital scale.
-    /// Only meaningful for [`RadialScale::Linear`]; used by the "true scale"
-    /// preset where bodies and orbits share one honest mapping.
-    pub fn true_radius_units(radius_km: f64, orbit: &RadialScale) -> f64 {
-        orbit.apply(radius_km / AU_KM)
-    }
-
     pub fn validate(&self) -> Result<(), ScaleError> {
         if !(self.earth_radius_units.is_finite() && self.earth_radius_units > 0.0) {
             return Err(ScaleError::EarthRadiusUnits(self.earth_radius_units));
@@ -187,9 +260,18 @@ mod tests {
 
     const ALL_LAWS: [RadialScale; 4] = [
         RadialScale::Linear { units_per_au: 1.0 },
-        RadialScale::Power { units_per_au: 1.0, exponent: 0.45 },
-        RadialScale::Power { units_per_au: 2.5, exponent: 1.0 },
-        RadialScale::Logarithmic { units_per_au: 1.0, softness: 0.3 },
+        RadialScale::Power {
+            units_per_au: 1.0,
+            exponent: 0.45,
+        },
+        RadialScale::Power {
+            units_per_au: 2.5,
+            exponent: 1.0,
+        },
+        RadialScale::Logarithmic {
+            units_per_au: 1.0,
+            softness: 0.3,
+        },
     ];
 
     /// The whole point of rescaling only the radius: direction survives.
@@ -283,7 +365,10 @@ mod tests {
     #[test]
     fn power_of_one_is_linear() {
         let linear = RadialScale::Linear { units_per_au: 3.0 };
-        let power = RadialScale::Power { units_per_au: 3.0, exponent: 1.0 };
+        let power = RadialScale::Power {
+            units_per_au: 3.0,
+            exponent: 1.0,
+        };
         for r in [0.1, 0.5, 1.0, 5.2, 30.1] {
             assert!((linear.apply(r) - power.apply(r)).abs() < 1e-12);
         }
@@ -351,19 +436,28 @@ mod tests {
                 .is_err()
         );
         assert!(
-            RadialScale::Power { units_per_au: 1.0, exponent: -0.5 }
-                .validate()
-                .is_err()
+            RadialScale::Power {
+                units_per_au: 1.0,
+                exponent: -0.5
+            }
+            .validate()
+            .is_err()
         );
         assert!(
-            RadialScale::Logarithmic { units_per_au: 1.0, softness: 0.0 }
-                .validate()
-                .is_err()
+            RadialScale::Logarithmic {
+                units_per_au: 1.0,
+                softness: 0.0
+            }
+            .validate()
+            .is_err()
         );
         assert!(
-            RadialScale::Power { units_per_au: f64::NAN, exponent: 1.0 }
-                .validate()
-                .is_err()
+            RadialScale::Power {
+                units_per_au: f64::NAN,
+                exponent: 1.0
+            }
+            .validate()
+            .is_err()
         );
     }
 }
