@@ -5,6 +5,16 @@
 // Mercury's. Native line primitives cannot do sub-pixel widths or antialiasing,
 // so each segment becomes a quad instead.
 
+// Per-ring parameters, one vec4 per drawn ring, selected by instance index:
+// x = where along the ring the body sits (0..1), y = base opacity,
+// z = trail strength, w = trail length. Everything per-frame lives here, so
+// the ribbon vertices themselves never change.
+struct OrbitRingParams {
+    rings: array<vec4<f32>, 16>,
+};
+
+@group(1) @binding(0) var<uniform> ring_params: OrbitRingParams;
+
 struct OrbitVertex {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) colour: vec3<f32>,
@@ -15,9 +25,10 @@ struct OrbitVertex {
 
 @vertex
 fn vertex_main(
+    @builtin(instance_index) ring_index: u32,
     @location(0) position: vec3<f32>,
     @location(1) neighbour: vec3<f32>,
-    // x = which side of the line (-1 or +1), y = brightness.
+    // x = which side of the line (-1 or +1), y = fraction along the ring.
     @location(2) params: vec2<f32>,
     @location(3) colour: vec3<f32>,
 ) -> OrbitVertex {
@@ -56,7 +67,12 @@ fn vertex_main(
         w_here,
     );
     out.colour = colour;
-    out.brightness = params.y;
+    // The planet travels toward increasing `along`, so the trail is the
+    // stretch just behind it. `fract` is rem_euclid(1.0): both are x − ⌊x⌋.
+    let ring = ring_params.rings[ring_index];
+    let behind = fract(ring.x - params.y);
+    let falloff = max(1.0 - behind / ring.w, 0.0);
+    out.brightness = ring.y * (1.0 + ring.z * falloff * falloff);
     out.across = params.x;
     return out;
 }

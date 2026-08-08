@@ -139,14 +139,22 @@ struct GpuBodyInstance {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable, PartialEq)]
 struct GpuOrbitVertex {
     position: [f32; 3],
     neighbour: [f32; 3],
-    /// x = which side of the ribbon (-1 or +1), y = brightness.
+    /// x = which side of the ribbon (-1 or +1), y = fraction along the ring
+    /// in `0..1`. Brightness is derived in the vertex shader from this and the
+    /// per-ring parameters, which is what lets this buffer be static.
     params: [f32; 2],
     colour: [f32; 3],
 }
+
+/// Per-ring parameters for the orbit shader, refreshed every frame while the
+/// ribbon vertices stay untouched: `x` = body fraction, `y` = opacity,
+/// `z` = trail strength, `w` = trail length. Uploading these 256 bytes
+/// replaced rewriting the whole 361 KB vertex buffer per frame.
+const MAX_ORBIT_RINGS: usize = 16;
 
 impl GpuOrbitVertex {
     const LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
@@ -174,18 +182,22 @@ struct GpuSegment {
 }
 
 /// Buffers and counts for everything drawn on the celestial sphere.
-///
-/// The buffers are never read back; they are held so their lifetime is
-/// obviously tied to the bind group that references them.
 struct Celestial {
+    /// Never read back or rewritten; held so its lifetime is obviously tied
+    /// to the bind group that references it.
     _stars: wgpu::Buffer,
     star_count: u32,
-    _segments: wgpu::Buffer,
+    /// Rewritten whenever the visible-figure set changes.
+    segments: wgpu::Buffer,
     segment_count: u32,
     bind_group: wgpu::BindGroup,
     /// Segments grouped by figure, so whole constellations can be shown or
     /// hidden as a unit rather than clipped mid-shape.
     figures: Vec<Vec<(glam::Vec3, glam::Vec3)>>,
+    /// Which figures were visible last frame. The set changes on the order of
+    /// once a minute under the default camera drift, so the repack and upload
+    /// are skipped whenever it is unchanged.
+    visible: Vec<bool>,
 }
 
 #[repr(C)]
@@ -229,9 +241,13 @@ impl GpuMesh {
 }
 
 /// Size-dependent GPU resources, rebuilt on resize.
+///
+/// These are by far the renderer's largest allocations — hundreds of
+/// megabytes at high resolutions — so they are held in an `Option` and
+/// released while the wallpaper is occluded: VRAM, unlike GPU time, is not
+/// time-sliced, and a resident-but-idle wallpaper competing with a fullscreen
+/// game for memory is what stutter is made of.
 struct Targets {
-    width: u32,
-    height: u32,
     multisampled_colour: wgpu::TextureView,
     hdr: wgpu::TextureView,
     depth: wgpu::TextureView,
@@ -260,6 +276,12 @@ pub struct Renderer {
     /// spanning every ring would stitch the end of one orbit to the start of
     /// the next.
     orbit_ranges: Vec<std::ops::Range<u32>>,
+    orbit_params: wgpu::Buffer,
+    orbit_params_bind_group: wgpu::BindGroup,
+    /// The scene generations whose data is already on the GPU. Zero never
+    /// matches — it is the uncached scenes' "always upload" marker.
+    uploaded_orbits_generation: u64,
+    uploaded_belts_generation: u64,
 
     sphere: GpuMesh,
     ring: GpuMesh,
@@ -280,7 +302,11 @@ pub struct Renderer {
     sampler: wgpu::Sampler,
 
     sample_count: u32,
-    targets: Targets,
+    /// The size the targets have, or will have when recreated after a
+    /// release.
+    size: (u32, u32),
+    /// `None` while released during occlusion; recreated on the next frame.
+    targets: Option<Targets>,
     celestial: Option<Celestial>,
     celestial_layout: wgpu::BindGroupLayout,
     belt_layout: wgpu::BindGroupLayout,
@@ -459,11 +485,14 @@ impl Renderer {
             }],
         });
 
-        let tonemap_settings = device.create_buffer(&wgpu::BufferDescriptor {
+        // The settings are compile-time constants, so the buffer is written
+        // exactly once, here.
+        let tonemap_settings = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("tonemap settings"),
-            size: size_of::<GpuTonemapSettings>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
+            contents: bytemuck::bytes_of(&GpuTonemapSettings {
+                values: [look::EXPOSURE, look::BLOOM_INTENSITY, 0.0, 0.0],
+            }),
+            usage: wgpu::BufferUsages::UNIFORM,
         });
 
         let instances_capacity = 32;
@@ -471,8 +500,39 @@ impl Renderer {
         let instances_bind_group =
             new_instance_bind_group(device, &instances_layout, &instances);
 
-        let orbit_capacity = 4096;
+        // Eight rings of 2·512 + 2 vertices; the next power of two above that,
+        // so the default scene never reallocates.
+        let orbit_capacity = 16384;
         let orbit_vertices = new_orbit_buffer(device, orbit_capacity);
+
+        let orbit_params = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("orbit ring params"),
+            size: (MAX_ORBIT_RINGS * size_of::<[f32; 4]>()) as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let orbit_params_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("orbit ring params"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+        let orbit_params_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("orbit ring params"),
+            layout: &orbit_params_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: orbit_params.as_entire_binding(),
+            }],
+        });
 
         let sphere = GpuMesh::upload(device, "sphere", &geometry::sphere(96, 48));
         let ring = GpuMesh::upload(device, "ring", &geometry::ring(256));
@@ -498,6 +558,12 @@ impl Renderer {
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("globals only"),
                 bind_group_layouts: &[Some(&globals_layout)],
+                immediate_size: 0,
+            });
+        let orbit_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("orbit"),
+                bind_group_layouts: &[Some(&globals_layout), Some(&orbit_params_layout)],
                 immediate_size: 0,
             });
         let blit_pipeline_layout =
@@ -616,7 +682,7 @@ impl Renderer {
 
         let orbit_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("orbits"),
-            layout: Some(&globals_only_layout),
+            layout: Some(&orbit_pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &orbit_shader,
                 entry_point: Some("vertex_main"),
@@ -846,6 +912,10 @@ impl Renderer {
             orbit_vertices,
             orbit_capacity,
             orbit_ranges: Vec::new(),
+            orbit_params,
+            orbit_params_bind_group,
+            uploaded_orbits_generation: 0,
+            uploaded_belts_generation: 0,
             sphere,
             ring,
             sky_pipeline,
@@ -862,7 +932,8 @@ impl Renderer {
             tonemap_layout,
             sampler,
             sample_count,
-            targets,
+            size: (width.max(1), height.max(1)),
+            targets: Some(targets),
             celestial: None,
             celestial_layout,
             belt_layout,
@@ -943,23 +1014,27 @@ impl Renderer {
             ],
         });
 
+        let figure_count = figures.len();
         self.celestial = Some(Celestial {
             _stars: star_buffer,
             star_count: stars.len() as u32,
-            _segments: segment_buffer,
+            segments: segment_buffer,
             // Nothing is drawn until the first frame decides what is visible.
             segment_count: 0,
             bind_group,
             figures,
+            visible: vec![false; figure_count],
         });
     }
 
     /// Choose which constellation figures to draw, and pack only those.
     ///
-    /// Re-evaluated every frame because the camera drifts. Whole figures are
-    /// kept or dropped together: a figure cut off by the frame edge reads as
-    /// stray lines rather than as a constellation, which is worse than showing
-    /// nothing.
+    /// The visibility test runs every frame because the camera drifts, but
+    /// under the default drift the *answer* changes on the order of once a
+    /// minute — so the segment repack and upload only happen when it does.
+    /// Whole figures are kept or dropped together: a figure cut off by the
+    /// frame edge reads as stray lines rather than as a constellation, which
+    /// is worse than showing nothing.
     fn select_visible_figures(&mut self, queue: &wgpu::Queue, scene: &Scene) {
         let Some(celestial) = &mut self.celestial else {
             return;
@@ -968,22 +1043,45 @@ impl Renderer {
         let forward = (scene.camera.target - scene.camera.eye).normalize_or(glam::Vec3::NEG_Z);
 
         // The shader rotates catalogue directions by the sky rotation, so the
-        // visibility test has to see the same orientation.
+        // visibility test has to see the same orientation. The rotation is
+        // pinned to zero, so the per-figure rotate-and-collect only exists on
+        // the branch that would need it.
         let rotation = look::SKY_ROTATION_DEG.to_radians();
-        let (sin, cos) = rotation.sin_cos();
-        let orient = |v: glam::Vec3| {
-            glam::Vec3::new(v.x * cos + v.z * sin, v.y, -v.x * sin + v.z * cos)
-        };
 
-        let mut packed: Vec<GpuSegment> = Vec::new();
-        for figure in &celestial.figures {
-            let oriented: Vec<(glam::Vec3, glam::Vec3)> =
-                figure.iter().map(|(a, b)| (orient(*a), orient(*b))).collect();
-            if !orrery_core::sky::figure_is_visible(
-                &oriented,
-                forward,
-                look::CONSTELLATION_MIN_BEHIND_SUN,
-            ) {
+        let mut changed = false;
+        for (index, figure) in celestial.figures.iter().enumerate() {
+            let visible = if rotation == 0.0 {
+                orrery_core::sky::figure_is_visible(
+                    figure,
+                    forward,
+                    look::CONSTELLATION_MIN_BEHIND_SUN,
+                )
+            } else {
+                let (sin, cos) = rotation.sin_cos();
+                let orient = |v: glam::Vec3| {
+                    glam::Vec3::new(v.x * cos + v.z * sin, v.y, -v.x * sin + v.z * cos)
+                };
+                let oriented: Vec<(glam::Vec3, glam::Vec3)> =
+                    figure.iter().map(|(a, b)| (orient(*a), orient(*b))).collect();
+                orrery_core::sky::figure_is_visible(
+                    &oriented,
+                    forward,
+                    look::CONSTELLATION_MIN_BEHIND_SUN,
+                )
+            };
+            if celestial.visible[index] != visible {
+                celestial.visible[index] = visible;
+                changed = true;
+            }
+        }
+        if !changed {
+            return;
+        }
+
+        let capacity: usize = celestial.figures.iter().map(Vec::len).sum();
+        let mut packed: Vec<GpuSegment> = Vec::with_capacity(capacity);
+        for (figure, visible) in celestial.figures.iter().zip(&celestial.visible) {
+            if !visible {
                 continue;
             }
             // Store the unrotated endpoints; the shader applies the rotation.
@@ -995,7 +1093,7 @@ impl Renderer {
 
         celestial.segment_count = packed.len() as u32;
         if !packed.is_empty() {
-            queue.write_buffer(&celestial._segments, 0, bytemuck::cast_slice(&packed));
+            queue.write_buffer(&celestial.segments, 0, bytemuck::cast_slice(&packed));
         }
     }
 
@@ -1003,23 +1101,39 @@ impl Renderer {
         if width == 0 || height == 0 {
             return;
         }
-        if width == self.targets.width && height == self.targets.height {
+        if (width, height) == self.size {
             return;
         }
-        self.targets = Targets::new(
+        self.size = (width, height);
+        // While released, only the size is recorded; the next frame rebuilds.
+        if self.targets.is_some() {
+            self.targets = Some(self.build_targets(device));
+        }
+    }
+
+    /// Drop the render targets, handing their VRAM back to the system.
+    ///
+    /// They are hundreds of megabytes at high resolutions and — unlike GPU
+    /// time — memory is not time-sliced, so a covered wallpaper holding them
+    /// costs every fullscreen application real stutter. Rebuilding on the
+    /// first visible frame takes milliseconds.
+    pub fn release_targets(&mut self) {
+        if self.targets.take().is_some() {
+            log::info!("released render targets while occluded");
+        }
+    }
+
+    fn build_targets(&self, device: &wgpu::Device) -> Targets {
+        Targets::new(
             device,
-            width,
-            height,
+            self.size.0,
+            self.size.1,
             self.sample_count,
             &self.blit_layout,
             &self.tonemap_layout,
             &self.sampler,
             &self.tonemap_settings,
-        );
-    }
-
-    pub fn size(&self) -> (u32, u32) {
-        (self.targets.width, self.targets.height)
+        )
     }
 
     /// Draw one frame into `output`.
@@ -1032,7 +1146,11 @@ impl Renderer {
         config: &Config,
         elapsed_seconds: f32,
     ) {
-        let (width, height) = (self.targets.width, self.targets.height);
+        if self.targets.is_none() {
+            self.targets = Some(self.build_targets(device));
+        }
+
+        let (width, height) = self.size;
         let aspect = width as f32 / height.max(1) as f32;
 
         self.upload_globals(queue, scene, config, aspect, elapsed_seconds);
@@ -1041,25 +1159,13 @@ impl Renderer {
         self.upload_belts(device, queue, scene);
         self.select_visible_figures(queue, scene);
 
-        queue.write_buffer(
-            &self.tonemap_settings,
-            0,
-            bytemuck::bytes_of(&GpuTonemapSettings {
-                values: [
-                    look::EXPOSURE,
-                    look::BLOOM_INTENSITY,
-                    0.0,
-                    0.0,
-                ],
-            }),
-        );
-
+        let targets = self.targets.as_ref().expect("ensured above");
         let mut encoder =
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
 
-        self.scene_pass(&mut encoder, sphere_instances, ring_instances);
-        self.bloom_pass(&mut encoder);
-        self.tonemap_pass(&mut encoder, output);
+        self.scene_pass(&mut encoder, targets, sphere_instances, ring_instances);
+        self.bloom_pass(&mut encoder, targets);
+        self.tonemap_pass(&mut encoder, targets, output);
 
         queue.submit([encoder.finish()]);
     }
@@ -1098,10 +1204,10 @@ impl Renderer {
                 (look::SKY_SEED % 1_048_576) as f32,
             ],
             viewport: [
-                self.targets.width as f32,
-                self.targets.height as f32,
-                1.0 / self.targets.width as f32,
-                1.0 / self.targets.height as f32,
+                self.size.0 as f32,
+                self.size.1 as f32,
+                1.0 / self.size.0 as f32,
+                1.0 / self.size.1 as f32,
             ],
             post: [
                 look::EXPOSURE,
@@ -1113,7 +1219,7 @@ impl Renderer {
             sky_c: [
                 // One pixel's angular size, so stars can be sized in pixels
                 // rather than in units of whatever lattice generated them.
-                scene.camera.fov_y_radians / self.targets.height.max(1) as f32,
+                scene.camera.fov_y_radians / self.size.1.max(1) as f32,
                 STAR_CORE_RADIUS_PIXELS,
                 config.sky.constellation_opacity,
                 0.0,
@@ -1166,6 +1272,15 @@ impl Renderer {
     }
 
     fn upload_belts(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, scene: &Scene) {
+        // The belts are byte-identical from frame to frame until the config
+        // changes, so a generation already on the GPU is simply kept there.
+        // Generation 0 marks an uncached scene and never matches.
+        if scene.belts_generation != 0
+            && scene.belts_generation == self.uploaded_belts_generation
+        {
+            return;
+        }
+
         let particles: Vec<GpuBeltParticle> = scene
             .belts
             .iter()
@@ -1188,6 +1303,7 @@ impl Renderer {
             .collect();
 
         self.belt_count = particles.len() as u32;
+        self.uploaded_belts_generation = scene.belts_generation;
         if particles.is_empty() {
             return;
         }
@@ -1207,43 +1323,35 @@ impl Renderer {
         scene: &Scene,
         config: &Config,
     ) {
-        let mut vertices = Vec::new();
-        self.orbit_ranges.clear();
-        for ring in &scene.orbits {
-            let count = ring.points.len();
-            if count < 2 {
-                continue;
-            }
-            let start = vertices.len() as u32;
-            for index in 0..count {
-                let position = ring.points[index];
-                let neighbour = ring.points[(index + 1) % count];
-                let along = index as f32 / count as f32;
-
-                // The planet travels toward increasing `along`, so the trail is
-                // the stretch just behind it.
-                let behind = (ring.body_fraction - along).rem_euclid(1.0);
-                let trail_length = look::TRAIL_LENGTH;
-                let falloff = (1.0 - behind / trail_length).max(0.0);
-                let brightness = config.orbits.opacity
-                    * (1.0 + look::TRAIL_STRENGTH * falloff * falloff);
-
-                for side in [-1.0_f32, 1.0] {
-                    vertices.push(GpuOrbitVertex {
-                        position: position.into(),
-                        neighbour: neighbour.into(),
-                        params: [side, brightness],
-                        colour: ring.color,
-                    });
-                }
-            }
-            // Close the loop by repeating this ring's first pair.
-            let first = vertices[start as usize];
-            let second = vertices[start as usize + 1];
-            vertices.push(first);
-            vertices.push(second);
-            self.orbit_ranges.push(start..vertices.len() as u32);
+        // The per-frame half: one small vec4 per ring. The vertex shader
+        // derives the trail brightness from these, so the body moving along
+        // its orbit no longer touches the vertex buffer at all.
+        let mut params = [[0.0f32; 4]; MAX_ORBIT_RINGS];
+        for (ring, slot) in scene.orbits.iter().zip(&mut params) {
+            *slot = [
+                ring.body_fraction,
+                config.orbits.opacity,
+                look::TRAIL_STRENGTH,
+                look::TRAIL_LENGTH,
+            ];
         }
+        queue.write_buffer(&self.orbit_params, 0, bytemuck::cast_slice(&params));
+
+        // The static half: ribbon geometry, rebuilt only when the ring
+        // geometry itself changed. Generation 0 marks an uncached scene and
+        // never matches.
+        if scene.orbits_generation != 0
+            && scene.orbits_generation == self.uploaded_orbits_generation
+        {
+            return;
+        }
+
+        let mut vertices = Vec::with_capacity(
+            scene.orbits.iter().map(|r| r.points.len() * 2 + 2).sum(),
+        );
+        self.orbit_ranges.clear();
+        pack_orbit_vertices(&scene.orbits, &mut vertices, &mut self.orbit_ranges);
+        self.uploaded_orbits_generation = scene.orbits_generation;
 
         if vertices.is_empty() {
             return;
@@ -1255,19 +1363,19 @@ impl Renderer {
         queue.write_buffer(&self.orbit_vertices, 0, bytemuck::cast_slice(&vertices));
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn scene_pass(
         &self,
         encoder: &mut wgpu::CommandEncoder,
+        targets: &Targets,
         sphere_instances: std::ops::Range<u32>,
         ring_instances: std::ops::Range<u32>,
     ) {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("scene"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &self.targets.multisampled_colour,
+                view: &targets.multisampled_colour,
                 depth_slice: None,
-                resolve_target: Some(&self.targets.hdr),
+                resolve_target: Some(&targets.hdr),
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                     // Only the resolved single-sample image is ever read.
@@ -1275,7 +1383,7 @@ impl Renderer {
                 },
             })],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: &self.targets.depth,
+                view: &targets.depth,
                 depth_ops: Some(wgpu::Operations {
                     // Reversed Z clears to the far plane, which is zero.
                     load: wgpu::LoadOp::Clear(0.0),
@@ -1328,15 +1436,19 @@ impl Renderer {
 
         if !self.orbit_ranges.is_empty() {
             pass.set_pipeline(&self.orbit_pipeline);
+            pass.set_bind_group(1, &self.orbit_params_bind_group, &[]);
             pass.set_vertex_buffer(0, self.orbit_vertices.slice(..));
-            for range in &self.orbit_ranges {
-                pass.draw(range.clone(), 0..1);
+            // The instance index is how each range finds its slot in the ring
+            // params array, which also caps the drawable rings at its length.
+            for (index, range) in self.orbit_ranges.iter().take(MAX_ORBIT_RINGS).enumerate() {
+                let index = index as u32;
+                pass.draw(range.clone(), index..index + 1);
             }
         }
     }
 
-    fn bloom_pass(&self, encoder: &mut wgpu::CommandEncoder) {
-        let mips = self.targets.bloom_mips.len();
+    fn bloom_pass(&self, encoder: &mut wgpu::CommandEncoder, targets: &Targets) {
+        let mips = targets.bloom_mips.len();
         if mips == 0 {
             return;
         }
@@ -1344,14 +1456,14 @@ impl Renderer {
         // Downsample: the scene into mip 0, then each mip into the next.
         for mip in 0..mips {
             let source = if mip == 0 {
-                &self.targets.hdr_source
+                &targets.hdr_source
             } else {
-                &self.targets.bloom_sources[mip - 1]
+                &targets.bloom_sources[mip - 1]
             };
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("bloom downsample"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.targets.bloom_mips[mip],
+                    view: &targets.bloom_mips[mip],
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
@@ -1374,7 +1486,7 @@ impl Renderer {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("bloom upsample"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.targets.bloom_mips[mip - 1],
+                    view: &targets.bloom_mips[mip - 1],
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
@@ -1389,12 +1501,17 @@ impl Renderer {
                 multiview_mask: None,
             });
             pass.set_pipeline(&self.bloom_upsample);
-            pass.set_bind_group(0, &self.targets.bloom_sources[mip], &[]);
+            pass.set_bind_group(0, &targets.bloom_sources[mip], &[]);
             pass.draw(0..3, 0..1);
         }
     }
 
-    fn tonemap_pass(&self, encoder: &mut wgpu::CommandEncoder, output: &wgpu::TextureView) {
+    fn tonemap_pass(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        targets: &Targets,
+        output: &wgpu::TextureView,
+    ) {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("tonemap"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1412,8 +1529,44 @@ impl Renderer {
             multiview_mask: None,
         });
         pass.set_pipeline(&self.tonemap_pipeline);
-        pass.set_bind_group(0, &self.targets.tonemap_bind_group, &[]);
+        pass.set_bind_group(0, &targets.tonemap_bind_group, &[]);
         pass.draw(0..3, 0..1);
+    }
+}
+
+/// Turn orbit rings into ribbon vertices: one pair per point alternating
+/// sides, plus a repeat of the first pair to close each loop, with one draw
+/// range per ring. Pure, so the packing arithmetic is testable without a GPU.
+fn pack_orbit_vertices(
+    orbits: &[orrery_core::scene::OrbitRing],
+    vertices: &mut Vec<GpuOrbitVertex>,
+    ranges: &mut Vec<std::ops::Range<u32>>,
+) {
+    for ring in orbits {
+        let count = ring.points.len();
+        if count < 2 {
+            continue;
+        }
+        let start = vertices.len() as u32;
+        for index in 0..count {
+            let position = ring.points[index];
+            let neighbour = ring.points[(index + 1) % count];
+            let along = index as f32 / count as f32;
+            for side in [-1.0_f32, 1.0] {
+                vertices.push(GpuOrbitVertex {
+                    position: position.into(),
+                    neighbour: neighbour.into(),
+                    params: [side, along],
+                    colour: ring.color,
+                });
+            }
+        }
+        // Close the loop by repeating this ring's first pair.
+        let first = vertices[start as usize];
+        let second = vertices[start as usize + 1];
+        vertices.push(first);
+        vertices.push(second);
+        ranges.push(start..vertices.len() as u32);
     }
 }
 
@@ -1667,8 +1820,6 @@ impl Targets {
         });
 
         Self {
-            width,
-            height,
             multisampled_colour,
             hdr,
             depth,
@@ -1677,5 +1828,70 @@ impl Targets {
             hdr_source,
             tonemap_bind_group,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use glam::Vec3;
+    use orrery_core::scene::OrbitRing;
+
+    fn ring(points: usize) -> OrbitRing {
+        OrbitRing {
+            points: (0..points)
+                .map(|i| Vec3::new(i as f32, 0.0, 0.0))
+                .collect::<Vec<_>>()
+                .into(),
+            color: [0.5, 0.6, 0.7],
+            body_fraction: 0.25,
+        }
+    }
+
+    /// The ribbon packing is index arithmetic with a wraparound and a closing
+    /// pair — exactly the kind of thing that breaks silently.
+    #[test]
+    fn orbit_packing_produces_closed_alternating_ribbons() {
+        let orbits = [ring(8), ring(4)];
+        let mut vertices = Vec::new();
+        let mut ranges = Vec::new();
+        pack_orbit_vertices(&orbits, &mut vertices, &mut ranges);
+
+        // 2 per point plus the closing pair, per ring.
+        assert_eq!(vertices.len(), (8 * 2 + 2) + (4 * 2 + 2));
+        assert_eq!(ranges.len(), 2);
+        assert_eq!(ranges[0], 0..18);
+        assert_eq!(ranges[1], 18..28);
+
+        for range in &ranges {
+            let slice = &vertices[range.start as usize..range.end as usize];
+            // Sides alternate -1, +1 along the whole strip.
+            for (i, vertex) in slice.iter().enumerate() {
+                let expected = if i % 2 == 0 { -1.0 } else { 1.0 };
+                assert_eq!(vertex.params[0], expected, "side at {i}");
+            }
+            // The closing pair repeats the first pair exactly, so the strip
+            // meets itself with no seam.
+            assert_eq!(slice[slice.len() - 2], slice[0]);
+            assert_eq!(slice[slice.len() - 1], slice[1]);
+            // `along` runs from 0 toward 1 and never reaches it.
+            for vertex in slice {
+                assert!((0.0..1.0).contains(&vertex.params[1]));
+            }
+        }
+
+        // Every vertex's neighbour is the next point, wrapping at the end.
+        let first_ring = &vertices[0..16];
+        assert_eq!(first_ring[14].neighbour, [0.0, 0.0, 0.0], "last point wraps to first");
+    }
+
+    #[test]
+    fn degenerate_rings_are_skipped() {
+        let orbits = [ring(1), ring(0), ring(3)];
+        let mut vertices = Vec::new();
+        let mut ranges = Vec::new();
+        pack_orbit_vertices(&orbits, &mut vertices, &mut ranges);
+        assert_eq!(ranges.len(), 1, "only the 3-point ring survives");
+        assert_eq!(vertices.len(), 3 * 2 + 2);
     }
 }

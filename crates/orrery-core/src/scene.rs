@@ -16,12 +16,15 @@
 //! which is a rotation, not a reflection — so the planets still orbit
 //! anticlockwise seen from the north, as they do in reality.
 
+use std::sync::Arc;
+
 use glam::{DVec3, Mat4, Quat, Vec2, Vec3};
 
 use crate::bodies::{self, BodyData, Rings};
 use crate::config::Config;
 use crate::ephemeris::{self, Planet};
 use crate::lookup::Lookup;
+use crate::scale::RadialScale;
 use crate::time::JulianDate;
 
 /// Convert an ecliptic-frame vector to the renderer's Y-up frame.
@@ -81,9 +84,13 @@ pub struct BodyInstance {
 }
 
 /// One drawn orbit, as a closed polyline in scene units.
+///
+/// The points are shared rather than owned because the geometry changes only
+/// when the osculating elements do — monthly under an almanac — while a scene
+/// is built every frame. Only `body_fraction` is per-frame.
 #[derive(Debug, Clone)]
 pub struct OrbitRing {
-    pub points: Vec<Vec3>,
+    pub points: Arc<[Vec3]>,
     pub color: [f32; 3],
     /// Where along `points` the body currently sits, in `0..1`. The renderer
     /// uses this to brighten the ring just behind the planet.
@@ -239,10 +246,164 @@ pub struct Scene {
     pub bodies: Vec<BodyInstance>,
     pub orbits: Vec<OrbitRing>,
     pub camera: CameraState,
-    /// Radius of the outermost drawn orbit, in scene units.
-    pub extent: f32,
-    /// Debris belts, outermost last.
-    pub belts: Vec<Belt>,
+    /// Debris belts, outermost last. Shared for the same reason as
+    /// [`OrbitRing::points`]: the particles are a pure function of the config.
+    pub belts: Arc<[Belt]>,
+    /// Which build of the belts this is. Increments when the cache rebuilds
+    /// them; 0 means "uncached — treat as new every time". The renderer skips
+    /// re-uploading a generation it has already sent to the GPU.
+    pub belts_generation: u64,
+    /// Which build of the orbit ring geometry this is; same convention.
+    pub orbits_generation: u64,
+}
+
+/// Reused state between [`Scene::build_cached`] calls.
+///
+/// The belts depend only on the config, and the orbit ring geometry only on
+/// the config and the osculating elements — which change monthly under an
+/// almanac. Rebuilding both every frame was, by a wide margin, the largest
+/// CPU cost in the whole application, spent computing bytes identical to the
+/// previous frame's.
+#[derive(Debug, Default)]
+pub struct SceneCache {
+    belts: Option<CachedBelts>,
+    orbits: Option<CachedOrbits>,
+    /// Monotonic stamp for cache rebuilds. Starts at 1 so a generation of 0
+    /// can mean "uncached" everywhere downstream.
+    next_generation: u64,
+}
+
+#[derive(Debug)]
+struct CachedBelts {
+    key: (bool, bool, RadialScale),
+    belts: Arc<[Belt]>,
+    generation: u64,
+}
+
+#[derive(Debug)]
+struct CachedOrbits {
+    scale: RadialScale,
+    epoch: f64,
+    /// Ring points per drawn planet, in [`DRAWN_PLANETS`] order.
+    points: Vec<Arc<[Vec3]>>,
+    generation: u64,
+}
+
+/// How far the epoch may move before cached ring geometry is rebuilt. The
+/// osculating elements drift over weeks, not hours; a quarter day of drift
+/// moves a ring by far less than a pixel, while live time at real rate takes
+/// six hours to cross it.
+const ORBIT_CACHE_TOLERANCE_DAYS: f64 = 0.25;
+
+impl SceneCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Forget everything. Call when the position source itself changes — an
+    /// almanac refresh landing — which no cache key here can observe.
+    pub fn invalidate(&mut self) {
+        self.belts = None;
+        self.orbits = None;
+    }
+
+    fn stamp(&mut self) -> u64 {
+        self.next_generation += 1;
+        self.next_generation
+    }
+
+    fn belts_for(&mut self, config: &Config) -> (Arc<[Belt]>, u64) {
+        let key = (
+            config.bodies.asteroid_belt,
+            config.bodies.kuiper_belt,
+            config.scale.orbit,
+        );
+        if let Some(cached) = &self.belts
+            && cached.key == key
+        {
+            return (Arc::clone(&cached.belts), cached.generation);
+        }
+        let belts: Arc<[Belt]> = build_belts(config).into();
+        let generation = self.stamp();
+        self.belts = Some(CachedBelts {
+            key,
+            belts: Arc::clone(&belts),
+            generation,
+        });
+        (belts, generation)
+    }
+
+    fn orbit_points_for(
+        &mut self,
+        scale: RadialScale,
+        lookup: &Lookup,
+        epoch: JulianDate,
+    ) -> (Vec<Arc<[Vec3]>>, u64) {
+        if let Some(cached) = &self.orbits
+            && cached.scale == scale
+            && (cached.epoch - epoch.0).abs() <= ORBIT_CACHE_TOLERANCE_DAYS
+        {
+            return (cached.points.clone(), cached.generation);
+        }
+        let points = build_ring_points(&scale, lookup, epoch);
+        let generation = self.stamp();
+        self.orbits = Some(CachedOrbits {
+            scale,
+            epoch: epoch.0,
+            points: points.clone(),
+            generation,
+        });
+        (points, generation)
+    }
+}
+
+/// Sample every drawn planet's orbit, in [`DRAWN_PLANETS`] order.
+fn build_ring_points(scale: &RadialScale, lookup: &Lookup, epoch: JulianDate) -> Vec<Arc<[Vec3]>> {
+    DRAWN_PLANETS
+        .into_iter()
+        .map(|planet| orbit_points(&lookup.elements(planet, epoch), scale))
+        .collect()
+}
+
+/// The debris belts the config asks for, outermost last.
+fn build_belts(config: &Config) -> Vec<Belt> {
+    let orbit_scale = &config.scale.orbit;
+    let mut belts = Vec::new();
+    if config.bodies.asteroid_belt {
+        // The main belt runs roughly 2.1 to 3.3 AU, between Mars and Jupiter.
+        belts.push(build_belt(
+            "Asteroid Belt",
+            2.1,
+            3.3,
+            0.10,
+            BELT_PARTICLES,
+            0xA57E_201D,
+            [0.72, 0.66, 0.56],
+            // The real main belt is invisible from anywhere. Drawn dense
+            // and additive it piles up into a solid glowing ring that
+            // out-shouts the Sun, so it is kept to a suggestion.
+            0.16,
+            orbit_scale,
+        ));
+    }
+    if config.bodies.kuiper_belt {
+        // The classical Kuiper belt runs from Neptune's orbit out to the
+        // 2:1 resonance at about 48 AU, and is far thicker than the main
+        // belt.
+        belts.push(build_belt(
+            "Kuiper Belt",
+            30.0,
+            48.0,
+            2.4,
+            (BELT_PARTICLES as f32 * 1.6) as u32,
+            0x4B1D_9E37,
+            [0.62, 0.70, 0.82],
+            // Spread over a far larger area, so it survives being brighter.
+            0.55,
+            orbit_scale,
+        ));
+    }
+    belts
 }
 
 impl Scene {
@@ -251,13 +412,49 @@ impl Scene {
     ///
     /// `lookup` decides where positions come from: a Horizons almanac when one
     /// covers this instant, the built-in tables otherwise.
+    ///
+    /// Everything is built from scratch. The render loop uses
+    /// [`Scene::build_cached`] instead; this entry point serves one-shot
+    /// callers — tests and screenshots — where a cache would be dead weight.
     pub fn build(config: &Config, lookup: &Lookup, epoch: JulianDate, aspect: f32) -> Self {
+        Self::assemble(config, lookup, epoch, aspect, config.camera.azimuth_deg, None)
+    }
+
+    /// [`Scene::build`], but reusing the belts and orbit geometry held in
+    /// `cache` when their inputs have not changed.
+    ///
+    /// `azimuth_deg` replaces the configured azimuth, so the camera drift does
+    /// not need a mutated copy of the whole `Config` — which would both
+    /// allocate every frame and destabilise the cache keys.
+    pub fn build_cached(
+        config: &Config,
+        lookup: &Lookup,
+        epoch: JulianDate,
+        aspect: f32,
+        azimuth_deg: f32,
+        cache: &mut SceneCache,
+    ) -> Self {
+        Self::assemble(config, lookup, epoch, aspect, azimuth_deg, Some(cache))
+    }
+
+    fn assemble(
+        config: &Config,
+        lookup: &Lookup,
+        epoch: JulianDate,
+        aspect: f32,
+        azimuth_deg: f32,
+        mut cache: Option<&mut SceneCache>,
+    ) -> Self {
         let orbit_scale = &config.scale.orbit;
         let body_scale = &config.scale.body;
 
+        let (ring_points, orbits_generation) = match cache.as_deref_mut() {
+            Some(cache) => cache.orbit_points_for(*orbit_scale, lookup, epoch),
+            None => (build_ring_points(orbit_scale, lookup, epoch), 0),
+        };
+
         let mut bodies_out = Vec::with_capacity(DRAWN_PLANETS.len() + 1);
         let mut orbits_out = Vec::with_capacity(DRAWN_PLANETS.len());
-        let mut extent: f32 = 0.0;
 
         for (index, planet) in DRAWN_PLANETS.into_iter().enumerate() {
             let elements = lookup.elements(planet, epoch);
@@ -279,14 +476,13 @@ impl Scene {
                 surface_seed: index as u32 + 1,
             });
 
-            let ring = build_orbit_ring(&elements, ORBIT_SEGMENTS, orbit_scale, data.color);
-            extent = extent.max(
-                ring.points
-                    .iter()
-                    .fold(0.0_f32, |acc, p| acc.max(p.length())),
-            );
-            orbits_out.push(ring);
-            extent = extent.max(position.length());
+            // The geometry may be cached; where the body sits on it is always
+            // this frame's.
+            orbits_out.push(OrbitRing {
+                points: Arc::clone(&ring_points[index]),
+                color: data.color,
+                body_fraction: body_fraction(&elements),
+            });
 
             // The Moon rides along with Earth.
             if planet == Planet::Earth && config.bodies.moon {
@@ -326,54 +522,14 @@ impl Scene {
             surface_seed: 0,
         };
 
-        // Guard against a config that draws nothing at all.
-        if extent <= f32::EPSILON {
-            extent = sun.radius.max(0.1) * 4.0;
-        }
-
-        let mut belts = Vec::new();
-        if config.bodies.asteroid_belt {
-            // The main belt runs roughly 2.1 to 3.3 AU, between Mars and Jupiter.
-            belts.push(build_belt(
-                "Asteroid Belt",
-                2.1,
-                3.3,
-                0.10,
-                BELT_PARTICLES,
-                0xA57E_201D,
-                [0.72, 0.66, 0.56],
-                // The real main belt is invisible from anywhere. Drawn dense
-                // and additive it piles up into a solid glowing ring that
-                // out-shouts the Sun, so it is kept to a suggestion.
-                0.16,
-                orbit_scale,
-            ));
-        }
-        if config.bodies.kuiper_belt {
-            // The classical Kuiper belt runs from Neptune's orbit out to the
-            // 2:1 resonance at about 48 AU, and is far thicker than the main
-            // belt.
-            let kuiper = build_belt(
-                "Kuiper Belt",
-                30.0,
-                48.0,
-                2.4,
-                (BELT_PARTICLES as f32 * 1.6) as u32,
-                0x4B1D_9E37,
-                [0.62, 0.70, 0.82],
-                // Spread over a far larger area, so it survives being brighter.
-                0.55,
-                orbit_scale,
-            );
-            for particle in &kuiper.particles {
-                extent = extent.max(particle.position.length());
-            }
-            belts.push(kuiper);
-        }
+        let (belts, belts_generation) = match cache {
+            Some(cache) => cache.belts_for(config),
+            None => (build_belts(config).into(), 0),
+        };
 
         // The framing is a closed form over one configured radius, so it needs
         // nothing from the scene it is framing.
-        let camera = frame_camera(config, aspect);
+        let camera = frame_camera_with_azimuth(config, aspect, azimuth_deg);
 
         Scene {
             epoch,
@@ -381,41 +537,31 @@ impl Scene {
             bodies: bodies_out,
             orbits: orbits_out,
             camera,
-            extent,
             belts,
+            belts_generation,
+            orbits_generation,
         }
     }
 }
 
 /// Sample a full orbit by sweeping eccentric anomaly, which distributes points
 /// evenly around the *ellipse* rather than clustering them at perihelion.
-fn build_orbit_ring(
-    elements: &ephemeris::Kepler,
-    segments: u32,
-    scale: &crate::scale::RadialScale,
-    color: [f32; 3],
-) -> OrbitRing {
-    let segments = segments.max(16);
-    let points = (0..segments)
+fn orbit_points(elements: &ephemeris::Kepler, scale: &RadialScale) -> Arc<[Vec3]> {
+    (0..ORBIT_SEGMENTS)
         .map(|i| {
-            let eccentric_anomaly = 360.0 * i as f64 / segments as f64;
+            let eccentric_anomaly = 360.0 * f64::from(i) / f64::from(ORBIT_SEGMENTS);
             ecliptic_to_scene(
                 scale.apply_to_position(
                     elements.position_at_eccentric_anomaly(eccentric_anomaly),
                 ),
             )
         })
-        .collect();
+        .collect()
+}
 
-    let body_fraction =
-        (ephemeris::solve_kepler(elements.mean_anomaly(), elements.e).rem_euclid(360.0) / 360.0)
-            as f32;
-
-    OrbitRing {
-        points,
-        color,
-        body_fraction,
-    }
+/// Where along its sampled ring a body currently sits, in `0..1`.
+fn body_fraction(elements: &ephemeris::Kepler) -> f32 {
+    (ephemeris::solve_kepler(elements.mean_anomaly(), elements.e).rem_euclid(360.0) / 360.0) as f32
 }
 
 /// Orientation of a body: obliquity applied to the ecliptic pole, then spin.
@@ -488,7 +634,9 @@ fn vertical_offset(offset_y: f32, aspect: f32) -> f32 {
     if aspect < 1.0 { -offset_y } else { offset_y }
 }
 
-fn frame_camera(config: &Config, aspect: f32) -> CameraState {
+/// The azimuth is a parameter rather than read from the config, which is how
+/// the per-frame camera drift avoids mutating a clone of the whole `Config`.
+fn frame_camera_with_azimuth(config: &Config, aspect: f32, azimuth_deg: f32) -> CameraState {
     let camera = &config.camera;
     let aspect = aspect.max(f32::EPSILON);
 
@@ -515,7 +663,7 @@ fn frame_camera(config: &Config, aspect: f32) -> CameraState {
     // directly, so this is cheap insurance rather than a correction.
     let distance = distance.max(1e-3);
 
-    let azimuth = camera.azimuth_deg.to_radians();
+    let azimuth = azimuth_deg.to_radians();
     let direction = Vec3::new(
         cos_elevation * azimuth.cos(),
         elevation.sin(),
@@ -840,7 +988,7 @@ mod tests {
 
         let outermost = scene.orbits.last().expect("an outermost orbit");
         let (mut visible_half_width, mut far_edge, mut near_arc) = (0.0f32, 0.0f32, 0.0f32);
-        for point in &outermost.points {
+        for point in outermost.points.iter() {
             let Some(ndc) = ndc_of(*point) else { continue };
             if ndc.y.abs() <= 1.0 {
                 visible_half_width = visible_half_width.max(ndc.x.abs());
@@ -909,7 +1057,7 @@ mod tests {
                 (clip.w > 0.0).then(|| clip.truncate() / clip.w)
             };
 
-            for point in &scene.orbits.last().expect("an outermost orbit").points {
+            for point in scene.orbits.last().expect("an outermost orbit").points.iter() {
                 if let Some(ndc) = ndc_of(*point) {
                     lowest_arc = lowest_arc.min(ndc.y);
                 }
@@ -1061,6 +1209,135 @@ mod tests {
         }
     }
 
+    /// The cached path must be an optimisation and nothing else: same inputs,
+    /// same scene, whether or not a cache sits in the middle.
+    #[test]
+    fn cached_and_uncached_scenes_are_identical() {
+        let config = Config::default();
+        let lookup = Lookup::builtin();
+        let mut cache = SceneCache::new();
+
+        let plain = Scene::build(&config, &lookup, EPOCH, 1.6);
+        // Twice, so the second pass exercises the cache-hit path too.
+        for _ in 0..2 {
+            let cached = Scene::build_cached(
+                &config,
+                &lookup,
+                EPOCH,
+                1.6,
+                config.camera.azimuth_deg,
+                &mut cache,
+            );
+            for (a, b) in plain.bodies.iter().zip(&cached.bodies) {
+                assert_eq!(a.name, b.name);
+                assert_eq!(a.position, b.position, "{} moved", a.name);
+                assert_eq!(a.orientation, b.orientation, "{} turned", a.name);
+            }
+            for (a, b) in plain.orbits.iter().zip(&cached.orbits) {
+                assert_eq!(a.body_fraction, b.body_fraction);
+                assert_eq!(a.points[..], b.points[..], "ring geometry differs");
+            }
+            for (a, b) in plain.belts.iter().zip(cached.belts.iter()) {
+                assert_eq!(a.name, b.name);
+                assert_eq!(a.particles.len(), b.particles.len());
+                for (pa, pb) in a.particles.iter().zip(&b.particles) {
+                    assert_eq!(pa.position, pb.position);
+                }
+            }
+            assert_eq!(plain.camera.eye, cached.camera.eye);
+        }
+    }
+
+    /// A cache hit must be a shared pointer, not a fresh copy — otherwise the
+    /// cache saves the arithmetic but keeps the allocation churn.
+    #[test]
+    fn a_second_frame_shares_rather_than_rebuilds() {
+        let config = Config::default();
+        let lookup = Lookup::builtin();
+        let mut cache = SceneCache::new();
+
+        let first = Scene::build_cached(&config, &lookup, EPOCH, 1.6, 0.0, &mut cache);
+        let second = Scene::build_cached(&config, &lookup, EPOCH, 1.6, 90.0, &mut cache);
+
+        assert!(Arc::ptr_eq(&first.belts, &second.belts), "belts were rebuilt");
+        for (a, b) in first.orbits.iter().zip(&second.orbits) {
+            assert!(Arc::ptr_eq(&a.points, &b.points), "ring points were rebuilt");
+        }
+        assert_eq!(first.belts_generation, second.belts_generation);
+        assert_eq!(first.orbits_generation, second.orbits_generation);
+        // Generation 0 is reserved for the uncached path.
+        assert!(first.belts_generation > 0 && first.orbits_generation > 0);
+        // The azimuth override reached the camera even on the shared path.
+        assert_ne!(first.camera.eye, second.camera.eye);
+    }
+
+    /// Moving the epoch far enough must rebuild the ring geometry — the orbits
+    /// genuinely change as elements drift — while the belts, which depend on
+    /// nothing time-varying, stay shared.
+    #[test]
+    fn epoch_movement_rebuilds_orbits_but_not_belts() {
+        let config = Config::default();
+        let lookup = Lookup::builtin();
+        let mut cache = SceneCache::new();
+
+        let now = Scene::build_cached(&config, &lookup, EPOCH, 1.6, 0.0, &mut cache);
+        let later = Scene::build_cached(
+            &config,
+            &lookup,
+            JulianDate(EPOCH.0 + 30.0),
+            1.6,
+            0.0,
+            &mut cache,
+        );
+
+        assert_ne!(now.orbits_generation, later.orbits_generation);
+        assert_eq!(now.belts_generation, later.belts_generation);
+        assert!(Arc::ptr_eq(&now.belts, &later.belts));
+
+        // Within the tolerance nothing rebuilds.
+        let barely = Scene::build_cached(
+            &config,
+            &lookup,
+            JulianDate(EPOCH.0 + 30.0 + ORBIT_CACHE_TOLERANCE_DAYS * 0.5),
+            1.6,
+            0.0,
+            &mut cache,
+        );
+        assert_eq!(later.orbits_generation, barely.orbits_generation);
+    }
+
+    #[test]
+    fn config_changes_rebuild_what_they_touch() {
+        let mut config = Config::default();
+        let lookup = Lookup::builtin();
+        let mut cache = SceneCache::new();
+
+        let before = Scene::build_cached(&config, &lookup, EPOCH, 1.6, 0.0, &mut cache);
+        config.bodies.kuiper_belt = false;
+        let after = Scene::build_cached(&config, &lookup, EPOCH, 1.6, 0.0, &mut cache);
+
+        assert_ne!(before.belts_generation, after.belts_generation);
+        assert_eq!(after.belts.len(), 1, "the Kuiper belt should be gone");
+        // The ring geometry saw no relevant change.
+        assert_eq!(before.orbits_generation, after.orbits_generation);
+    }
+
+    /// `invalidate` is the hook for when the position source itself changes —
+    /// an almanac landing — which no key in the cache can see.
+    #[test]
+    fn invalidate_forces_a_full_rebuild() {
+        let config = Config::default();
+        let lookup = Lookup::builtin();
+        let mut cache = SceneCache::new();
+
+        let before = Scene::build_cached(&config, &lookup, EPOCH, 1.6, 0.0, &mut cache);
+        cache.invalidate();
+        let after = Scene::build_cached(&config, &lookup, EPOCH, 1.6, 0.0, &mut cache);
+
+        assert_ne!(before.belts_generation, after.belts_generation);
+        assert_ne!(before.orbits_generation, after.orbits_generation);
+    }
+
     #[test]
     fn planets_advance_along_their_orbits_over_time() {
         let now = Scene::build(&Config::default(), &Lookup::builtin(), EPOCH, 1.6);
@@ -1150,9 +1427,7 @@ mod epoch_sweep {
 
             let mut azimuth = 0.0f32;
             while azimuth < 360.0 {
-                let mut turned = config.clone();
-                turned.camera.azimuth_deg = azimuth;
-                let camera = frame_camera(&turned, ASPECT);
+                let camera = frame_camera_with_azimuth(&config, ASPECT, azimuth);
                 let view_projection = camera.view_projection(ASPECT);
 
                 for body in &scene.bodies {

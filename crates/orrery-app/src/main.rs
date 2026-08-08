@@ -22,7 +22,7 @@ use anyhow::{Context, Result, bail};
 use notify::Watcher;
 use orrery_core::config::Config;
 use orrery_core::lookup::Lookup;
-use orrery_core::scene::Scene;
+use orrery_core::scene::{Scene, SceneCache};
 use orrery_core::time::JulianDate;
 use orrery_render::Renderer;
 use winit::application::ApplicationHandler;
@@ -304,7 +304,23 @@ struct App {
     /// Set from the wgpu device-lost callback, which may fire on any thread;
     /// the event loop reacts by rebuilding the graphics on its own thread.
     device_lost: Arc<AtomicBool>,
+    /// Belts and orbit geometry reused across frames.
+    scene_cache: SceneCache,
+    /// When the surface started reporting `Occluded`, if it currently does.
+    /// Drives the slow-tick backoff and, after a few seconds, the release of
+    /// the render targets' VRAM.
+    occluded_since: Option<Instant>,
 }
+
+/// How long the surface must stay occluded before the render targets are
+/// released. Long enough that alt-tabbing does not thrash hundreds of
+/// megabytes of allocations; short enough that a game gets the memory back
+/// moments after it covers the desktop.
+const OCCLUDED_RELEASE_AFTER: Duration = Duration::from_secs(5);
+
+/// The frame budget while occluded: one probe a second to notice becoming
+/// visible again, instead of the full configured rate for invisible frames.
+const OCCLUDED_FRAME_BUDGET: Duration = Duration::from_secs(1);
 
 impl App {
     fn new(
@@ -343,6 +359,8 @@ impl App {
             next_refresh_check: Instant::now() + REFRESH_CHECK_INTERVAL,
             refresh_backoff: REFRESH_RETRY_MIN,
             device_lost: Arc::new(AtomicBool::new(false)),
+            scene_cache: SceneCache::new(),
+            occluded_since: None,
         };
         app.start_refresh_if_due();
         app
@@ -399,6 +417,8 @@ impl App {
                     almanac.bodies.len()
                 );
                 self.lookup.set_almanac(Some(almanac));
+                // The cached orbit geometry was computed from the old source.
+                self.scene_cache.invalidate();
                 self.almanac_rx = None;
                 self.next_refresh_check = Instant::now() + REFRESH_CHECK_INTERVAL;
                 self.refresh_backoff = REFRESH_RETRY_MIN;
@@ -498,30 +518,50 @@ impl App {
                     .configure(&graphics.device, &graphics.surface_config);
                 return;
             }
-            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => return,
+            wgpu::CurrentSurfaceTexture::Timeout => return,
+            wgpu::CurrentSurfaceTexture::Occluded => {
+                // Invisible. After a grace period, hand the render targets'
+                // VRAM back so a fullscreen application is not competing with
+                // a wallpaper it has covered.
+                let since = *self.occluded_since.get_or_insert_with(Instant::now);
+                if since.elapsed() >= OCCLUDED_RELEASE_AFTER {
+                    graphics.renderer.release_targets();
+                }
+                return;
+            }
             wgpu::CurrentSurfaceTexture::Validation => {
                 log::error!("surface validation error");
                 return;
             }
         };
+        self.occluded_since = None;
 
         // The acquired frame is the authoritative size: the window's inner
         // size can disagree for a frame around a resize, and the renderer's
         // projection uses the surface dimensions.
         let aspect = frame.texture.width() as f32 / frame.texture.height() as f32;
 
-        // The camera drift is expressed per hour, so it stays gentle.
-        let mut config = self.config.clone();
-        if config.camera.rotation_period_minutes > 0.0 {
-            let period = config.camera.rotation_period_minutes * 60.0;
+        // The camera drift is expressed per hour, so it stays gentle. It is
+        // handed to the scene as a parameter — mutating a clone of the config
+        // every frame would both allocate and destabilise the scene cache.
+        let camera = &self.config.camera;
+        let azimuth_deg = if camera.rotation_period_minutes > 0.0 {
+            let period = camera.rotation_period_minutes * 60.0;
             // Accumulate in f64 and wrap before the one cast: an f32 total in
             // the hundreds of thousands of degrees — a few weeks of uptime —
             // has ULPs coarser than the drift it is accumulating.
-            config.camera.azimuth_deg = (f64::from(config.camera.azimuth_deg)
-                + elapsed / period * 360.0)
-                .rem_euclid(360.0) as f32;
-        }
-        let scene = Scene::build(&config, &self.lookup, epoch, aspect);
+            (f64::from(camera.azimuth_deg) + elapsed / period * 360.0).rem_euclid(360.0) as f32
+        } else {
+            camera.azimuth_deg
+        };
+        let scene = Scene::build_cached(
+            &self.config,
+            &self.lookup,
+            epoch,
+            aspect,
+            azimuth_deg,
+            &mut self.scene_cache,
+        );
 
         let view = frame.texture.create_view(&Default::default());
         graphics.renderer.render(
@@ -529,7 +569,7 @@ impl App {
             &graphics.queue,
             &view,
             &scene,
-            &config,
+            &self.config,
             elapsed as f32,
         );
         graphics.queue.present(frame);
@@ -594,8 +634,13 @@ impl ApplicationHandler for App {
         }
 
         // A wallpaper has no business running at the display's full refresh
-        // rate, so redraws are paced to the configured frame budget.
-        let budget = Duration::from_secs_f64(1.0 / self.config.render.fps.max(1) as f64);
+        // rate, so redraws are paced to the configured frame budget — and an
+        // occluded one only probes for visibility, at one frame a second.
+        let budget = if self.occluded_since.is_some() {
+            OCCLUDED_FRAME_BUDGET
+        } else {
+            Duration::from_secs_f64(1.0 / self.config.render.fps.max(1) as f64)
+        };
         let since_last = self.last_frame.elapsed();
         if since_last >= budget {
             self.last_frame = Instant::now();
@@ -653,7 +698,12 @@ impl App {
 
         let surface = instance.create_surface(window.clone())?;
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
+            // A wallpaper on the integrated GPU, always. `HighPerformance`
+            // pins the discrete GPU of a hybrid machine awake around the
+            // clock to draw a background; the workload here is trivial for
+            // any adapter. The screenshot path keeps `HighPerformance` — a
+            // one-shot render is exactly what it is for.
+            power_preference: wgpu::PowerPreference::LowPower,
             compatible_surface: Some(&surface),
             force_fallback_adapter: false,
             ..Default::default()
