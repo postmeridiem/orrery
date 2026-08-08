@@ -549,6 +549,31 @@ preserves the codebase's own disciplines: why-comments, world-fact tests, the
 config prune (no new quality knobs without cause), and
 `deny_unknown_fields` everywhere.
 
+**Design goal (owner's constraint).** The wallpaper may use the GPU
+sparingly; it must never impose a real performance hit on foreground
+software. That decomposes into three budgets, because a background app hurts
+a foreground one through three different resources:
+
+1. *GPU time* — sub-millisecond per frame while visible (delivered by the
+   Phase 3 sky cache). GPU time is time-sliced by the driver, so this is
+   the least dangerous vector; a few dozen microseconds of draws at 30 fps
+   is imperceptible even to a GPU-bound game.
+2. *CPU time* — no per-frame rebuild of constant data (Phase 2), so game
+   simulation/render threads lose nothing.
+3. *VRAM residency* — the vector that actually causes game stutter: memory,
+   unlike GPU time, is not time-sliced. The ~122 MB (1080p) to ~486 MB (4K)
+   of render targets per output stay resident even in frames where the
+   wallpaper does nothing, and paging them out under a game's memory
+   pressure is what stutter is made of. While occluded the targets should
+   be *released*, not merely unused (Phase 2 item 5).
+
+The dominant case in practice: a fullscreen game means the wallpaper is not
+visible at all, so the correct steady state during gaming is ~zero CPU,
+zero GPU submissions, and ~zero VRAM. The minimal subset that meets the
+constraint is Phase 1 item 1 (occlusion reorder) + Phase 2 item 5
+(LowPower, occlusion backoff, target release) + Phase 3 item 1 (sky cache,
+for the visible-cost budget).
+
 ### Phase 1 — correctness & long-uptime robustness (output-identical)
 
 1. **Reorder frame acquisition before scene build** (`main.rs:414-461`) so
@@ -620,9 +645,21 @@ rebuilds/s):
    `Renderer::new`.
 5. **Power**: `PowerPreference::LowPower` (`main.rs:550`; screenshot keeps
    HighPerformance). While frames come back `Occluded`, stretch the frame
-   budget to 1 s — sub-second recovery is invisible for a wallpaper.
-   Deliberately **not** adding quality knobs (MSAA/particles/segments),
-   which would reverse the documented config prune.
+   budget to 1 s — sub-second recovery is invisible for a wallpaper — and
+   after ~5 s of continuous occlusion **drop the `Targets` struct
+   entirely**, releasing the MSAA/HDR/depth/bloom allocations (~122 MB at
+   1080p, ~486 MB at 4K, per output) back to the system; recreate on the
+   first visible frame (`Targets::new` is milliseconds — `resize` already
+   proves the rebuild path). VRAM is the one resource contention does not
+   time-slice, so this is the item that protects fullscreen games (see the
+   design-goal note above). Caveat to verify on hardware: under the Plasma
+   nested compositor the surface may never report `Occluded` even when the
+   desktop is fully covered — if so, the fallback is plumbing a visibility
+   hint from the QML side (the wallpaper item's window state) through an
+   environment the client already reads, and this item becomes
+   load-bearing rather than opportunistic. Deliberately **not** adding
+   quality knobs (MSAA/particles/segments), which would reverse the
+   documented config prune.
 
 *Verification:* new core tests — same-epoch `build_cached` twice →
 `Arc::ptr_eq` + unchanged generations; cached vs uncached scenes identical;
@@ -700,6 +737,12 @@ byte-identical to Phase 3 output (nothing here touches rendering).
    machines; power before/after with `powertop`/`intel_gpu_top`.
 5. One overnight run: daily refresh-check log lines appear, azimuth stays
    smooth past 24 h.
+6. With a fullscreen game (or any fullscreen window) running: confirm the
+   process actually goes quiet — CPU near zero, no GPU submissions, VRAM
+   released (watch with `intel_gpu_top`/`nvidia-smi` and the occlusion log
+   line). If the nested-compositor path never reports occlusion, the
+   QML-side visibility fallback in Phase 2 item 5 must be implemented
+   before the design goal is considered met.
 
 ## 8. Verification appendix — how this review was produced
 
