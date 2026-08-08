@@ -252,6 +252,15 @@ pub fn parse_stars(text: &str) -> Result<Vec<Star>, CatalogError> {
             reason: reason.to_owned(),
         };
         let mut fields = line.split(',');
+        // HR is an integer identity, not a measurement: parse it as one, so a
+        // fractional or negative value is an error here rather than a silent
+        // truncation that mis-resolves a constellation line later.
+        let hr: u32 = fields
+            .next()
+            .ok_or_else(|| fail("missing hr"))?
+            .trim()
+            .parse()
+            .map_err(|_| fail("unparseable hr"))?;
         let mut next = |what: &str| -> Result<f64, CatalogError> {
             fields
                 .next()
@@ -261,7 +270,6 @@ pub fn parse_stars(text: &str) -> Result<Vec<Star>, CatalogError> {
                 .map_err(|_| fail(&format!("unparseable {what}")))
         };
 
-        let hr = next("hr")? as u32;
         let right_ascension = next("ra")?;
         let declination = next("dec")?;
         let magnitude = next("v")?;
@@ -509,6 +517,10 @@ mod tests {
             "hr,ra,dec,v,bv\n2491,101.2,-99.0,-1.46,0.0\n",   // dec out of range
             "hr,ra,dec,v,bv\n2491,101.2,-16.7\n",             // truncated
             "hr,ra,dec,v,bv\n2491,abc,-16.7,-1.46,0.0\n",     // unparseable
+            // HR is an identity, so anything but a whole number would silently
+            // mis-resolve a constellation segment if it were truncated through.
+            "hr,ra,dec,v,bv\n2491.7,101.2,-16.7,-1.46,0.0\n", // fractional hr
+            "hr,ra,dec,v,bv\n-1,101.2,-16.7,-1.46,0.0\n",     // negative hr
         ] {
             assert!(parse_stars(bad).is_err(), "accepted {bad:?}");
         }

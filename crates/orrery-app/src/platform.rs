@@ -47,8 +47,15 @@ pub fn configure_window(window: &Window, windowed: bool) {
     // SAFETY: winit hands back a live NSView pointer for the window we just
     // created, and we are on the main thread inside the event loop.
     unsafe {
-        let view: Retained<NSView> = Retained::retain(appkit.ns_view.as_ptr().cast())
-            .expect("winit returned a null NSView");
+        // This whole path is unverified on hardware, so nothing in it may
+        // panic: a wallpaper that cannot reach the desktop level should run
+        // as a normal window, not abort.
+        let Some(view): Option<Retained<NSView>> =
+            Retained::retain(appkit.ns_view.as_ptr().cast())
+        else {
+            log::warn!("winit returned a null NSView; leaving the window at its default level");
+            return;
+        };
         let Some(ns_window): Option<Retained<NSWindow>> = view.window() else {
             log::warn!("the NSView has no window yet");
             return;

@@ -14,6 +14,7 @@ mod screenshot;
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
 
@@ -132,7 +133,14 @@ fn parse_arguments() -> Result<Options> {
                 let (width, height) = value
                     .split_once(['x', 'X'])
                     .context("--size must look like 1920x1080")?;
-                options.size = (width.parse()?, height.parse()?);
+                options.size = (
+                    width
+                        .parse()
+                        .with_context(|| format!("--size width {width:?} is not a number"))?,
+                    height
+                        .parse()
+                        .with_context(|| format!("--size height {height:?} is not a number"))?,
+                );
             }
             "--help" | "-h" => {
                 println!(
@@ -216,6 +224,20 @@ fn refresh_ephemeris_now(destination: Option<PathBuf>) -> Result<()> {
 /// over, which is also what triggers a refresh.
 const BUNDLED_ALMANAC: &str = include_str!("../../../data/almanac.toml");
 
+/// How often a healthy process re-asks whether the almanac needs refreshing.
+/// A wallpaper runs for months, so waiting to be restarted is not a schedule.
+const REFRESH_CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// First retry delay after a failed fetch. Doubles per failure up to
+/// [`REFRESH_CHECK_INTERVAL`], so a laptop that was briefly offline recovers
+/// within the hour while a genuinely dead network settles at one try a day.
+const REFRESH_RETRY_MIN: Duration = Duration::from_secs(60 * 60);
+
+/// The retry delay that follows a failed fetch at the given delay.
+fn next_retry_backoff(current: Duration) -> Duration {
+    (current * 2).min(REFRESH_CHECK_INTERVAL)
+}
+
 /// Hand the star catalogue to the renderer, tolerating a broken one.
 fn load_catalog_into(renderer: &mut Renderer, device: &wgpu::Device) {
     match orrery_core::sky::Catalog::embedded() {
@@ -275,6 +297,13 @@ struct App {
     lookup: Lookup,
     /// Result of the background Horizons fetch, if one is in flight.
     almanac_rx: Option<Receiver<Option<orrery_core::almanac::Almanac>>>,
+    /// When to next ask whether the almanac needs refreshing.
+    next_refresh_check: Instant,
+    /// Retry delay for the next attempt after a failed fetch.
+    refresh_backoff: Duration,
+    /// Set from the wgpu device-lost callback, which may fire on any thread;
+    /// the event loop reacts by rebuilding the graphics on its own thread.
+    device_lost: Arc<AtomicBool>,
 }
 
 impl App {
@@ -284,7 +313,10 @@ impl App {
         options: Options,
         lookup: Lookup,
     ) -> Self {
-        let epoch = config.time.start_epoch().unwrap_or_else(|_| JulianDate::now());
+        let epoch = config.time.start_epoch().unwrap_or_else(|error| {
+            log::warn!("ignoring unusable [time] date: {error}");
+            JulianDate::now()
+        });
         let (reload_rx, watcher) = match &config_path {
             Some(path) => match watch_config(path) {
                 Ok((rx, watcher)) => (Some(rx), Some(watcher)),
@@ -308,6 +340,9 @@ impl App {
             _watcher: watcher,
             lookup,
             almanac_rx: None,
+            next_refresh_check: Instant::now() + REFRESH_CHECK_INTERVAL,
+            refresh_backoff: REFRESH_RETRY_MIN,
+            device_lost: Arc::new(AtomicBool::new(false)),
         };
         app.start_refresh_if_due();
         app
@@ -352,7 +387,9 @@ impl App {
         log::info!("refreshing the ephemeris in the background");
     }
 
-    /// Adopt a completed background fetch, if there is one.
+    /// Adopt a completed background fetch, if there is one. A failed fetch
+    /// schedules a retry with growing backoff instead of giving up until the
+    /// process is restarted — which, for a wallpaper, may be never.
     fn collect_refresh(&mut self) {
         let Some(rx) = &self.almanac_rx else { return };
         match rx.try_recv() {
@@ -363,10 +400,22 @@ impl App {
                 );
                 self.lookup.set_almanac(Some(almanac));
                 self.almanac_rx = None;
+                self.next_refresh_check = Instant::now() + REFRESH_CHECK_INTERVAL;
+                self.refresh_backoff = REFRESH_RETRY_MIN;
             }
-            Ok(None) => self.almanac_rx = None,
+            Ok(None) => {
+                self.almanac_rx = None;
+                self.next_refresh_check = Instant::now() + self.refresh_backoff;
+                self.refresh_backoff = next_retry_backoff(self.refresh_backoff);
+            }
             Err(std::sync::mpsc::TryRecvError::Empty) => {}
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => self.almanac_rx = None,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                // The fetch thread died without reporting; treat it as a
+                // failure so the schedule keeps moving.
+                self.almanac_rx = None;
+                self.next_refresh_check = Instant::now() + self.refresh_backoff;
+                self.refresh_backoff = next_retry_backoff(self.refresh_backoff);
+            }
         }
     }
 
@@ -402,8 +451,24 @@ impl App {
         match load_config(self.config_path.as_deref()) {
             Ok(config) => {
                 log::info!("configuration reloaded");
-                self.epoch = config.time.start_epoch().unwrap_or_else(|_| JulianDate::now());
-                self.started = Instant::now();
+                // Only reset the clocks when the time base actually changed;
+                // otherwise every save of the file — even a comment edit —
+                // snaps the camera drift back to zero.
+                if config.time != self.config.time {
+                    self.epoch = config.time.start_epoch().unwrap_or_else(|error| {
+                        log::warn!("ignoring unusable [time] date: {error}");
+                        JulianDate::now()
+                    });
+                    self.started = Instant::now();
+                }
+                if config.render.vsync != self.config.render.vsync
+                    && let Some(graphics) = &mut self.graphics
+                {
+                    graphics.surface_config.present_mode = present_mode(config.render.vsync);
+                    graphics
+                        .surface
+                        .configure(&graphics.device, &graphics.surface_config);
+                }
                 self.config = config;
             }
             // A half-written file mid-save is normal; keep the old config.
@@ -414,6 +479,7 @@ impl App {
     fn draw(&mut self) {
         // Sample the clock before borrowing `graphics` mutably.
         let epoch = self.current_epoch();
+        let elapsed = self.started.elapsed().as_secs_f64();
         let Some(graphics) = &mut self.graphics else { return };
 
         let size = graphics.window.inner_size();
@@ -421,17 +487,8 @@ impl App {
             return;
         }
 
-        let aspect = size.width as f32 / size.height as f32;
-        let elapsed = self.started.elapsed().as_secs_f32();
-
-        // The camera drift is expressed per hour, so it stays gentle.
-        let mut config = self.config.clone();
-        if config.camera.rotation_period_minutes > 0.0 {
-            let period = config.camera.rotation_period_minutes * 60.0;
-            config.camera.azimuth_deg += (elapsed as f64 / period * 360.0) as f32;
-        }
-        let scene = Scene::build(&config, &self.lookup, epoch, aspect);
-
+        // Acquire the frame *before* building the scene, so a covered or
+        // occluded wallpaper skips the whole CPU build, not just the GPU work.
         let frame = match graphics.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
             | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
@@ -448,6 +505,24 @@ impl App {
             }
         };
 
+        // The acquired frame is the authoritative size: the window's inner
+        // size can disagree for a frame around a resize, and the renderer's
+        // projection uses the surface dimensions.
+        let aspect = frame.texture.width() as f32 / frame.texture.height() as f32;
+
+        // The camera drift is expressed per hour, so it stays gentle.
+        let mut config = self.config.clone();
+        if config.camera.rotation_period_minutes > 0.0 {
+            let period = config.camera.rotation_period_minutes * 60.0;
+            // Accumulate in f64 and wrap before the one cast: an f32 total in
+            // the hundreds of thousands of degrees — a few weeks of uptime —
+            // has ULPs coarser than the drift it is accumulating.
+            config.camera.azimuth_deg = (f64::from(config.camera.azimuth_deg)
+                + elapsed / period * 360.0)
+                .rem_euclid(360.0) as f32;
+        }
+        let scene = Scene::build(&config, &self.lookup, epoch, aspect);
+
         let view = frame.texture.create_view(&Default::default());
         graphics.renderer.render(
             &graphics.device,
@@ -455,7 +530,7 @@ impl App {
             &view,
             &scene,
             &config,
-            elapsed,
+            elapsed as f32,
         );
         graphics.queue.present(frame);
     }
@@ -463,16 +538,7 @@ impl App {
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.graphics.is_some() {
-            return;
-        }
-        match self.create_graphics(event_loop) {
-            Ok(graphics) => self.graphics = Some(graphics),
-            Err(error) => {
-                log::error!("could not start the renderer: {error:#}");
-                event_loop.exit();
-            }
-        }
+        self.ensure_graphics(event_loop);
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -511,6 +577,22 @@ impl ApplicationHandler for App {
         self.reload_config_if_changed();
         self.collect_refresh();
 
+        // A lost device — driver reset, GPU gone to sleep badly — leaves every
+        // resource invalid. The callback only sets a flag, because it can fire
+        // on any thread; the rebuild has to happen here, on the loop's thread.
+        if self.device_lost.swap(false, Ordering::Relaxed) {
+            log::warn!("GPU device lost; rebuilding the renderer");
+            self.graphics = None;
+            self.ensure_graphics(event_loop);
+        }
+
+        // Re-ask about the almanac on schedule. `needs_refresh` remains the
+        // staleness authority, so this costs one comparison a frame.
+        if self.almanac_rx.is_none() && Instant::now() >= self.next_refresh_check {
+            self.next_refresh_check = Instant::now() + REFRESH_CHECK_INTERVAL;
+            self.start_refresh_if_due();
+        }
+
         // A wallpaper has no business running at the display's full refresh
         // rate, so redraws are paced to the configured frame budget.
         let budget = Duration::from_secs_f64(1.0 / self.config.render.fps.max(1) as f64);
@@ -529,7 +611,31 @@ impl ApplicationHandler for App {
     }
 }
 
+/// The present mode for a vsync choice, shared by creation and reload.
+fn present_mode(vsync: bool) -> wgpu::PresentMode {
+    if vsync {
+        wgpu::PresentMode::Fifo
+    } else {
+        wgpu::PresentMode::AutoNoVsync
+    }
+}
+
 impl App {
+    /// Create the window and GPU state if they do not currently exist.
+    /// Called at startup and again after a device loss.
+    fn ensure_graphics(&mut self, event_loop: &ActiveEventLoop) {
+        if self.graphics.is_some() {
+            return;
+        }
+        match self.create_graphics(event_loop) {
+            Ok(graphics) => self.graphics = Some(graphics),
+            Err(error) => {
+                log::error!("could not start the renderer: {error:#}");
+                event_loop.exit();
+            }
+        }
+    }
+
     fn create_graphics(&self, event_loop: &ActiveEventLoop) -> Result<Graphics> {
         let mut attributes = Window::default_attributes()
             .with_title("Orrery")
@@ -563,6 +669,20 @@ impl App {
                 ..Default::default()
             }))?;
 
+        // Errors outside an error scope would otherwise panic wgpu's internal
+        // thread; a wallpaper should log and keep drawing what it can.
+        device.on_uncaptured_error(Arc::new(|error| {
+            log::error!("wgpu error: {error}");
+        }));
+        // The callback may fire on any thread, so it only raises a flag; the
+        // event loop notices and rebuilds. This is the only path through a
+        // driver reset for a process that runs for weeks.
+        let device_lost = self.device_lost.clone();
+        device.set_device_lost_callback(move |reason, message| {
+            log::warn!("device lost ({reason:?}): {message}");
+            device_lost.store(true, Ordering::Relaxed);
+        });
+
         let size = window.inner_size();
         let (width, height) = (size.width.max(1), size.height.max(1));
 
@@ -573,7 +693,24 @@ impl App {
             .iter()
             .copied()
             .find(|f| f.is_srgb())
-            .unwrap_or(capabilities.formats[0]);
+            .or_else(|| capabilities.formats.first().copied())
+            .context("the surface reports no supported formats")?;
+        if !format.is_srgb() {
+            // Tonemapping dithers in linear space expecting the hardware to
+            // apply the sRGB transfer function; without it the output is
+            // visibly wrong, but still better than refusing to start.
+            log::warn!("no sRGB surface format available; using {format:?} and colours will be off");
+        }
+        // `Opaque` is not universal; fall back to whatever the compositor
+        // advertises rather than failing surface configuration.
+        let alpha_mode = if capabilities
+            .alpha_modes
+            .contains(&wgpu::CompositeAlphaMode::Opaque)
+        {
+            wgpu::CompositeAlphaMode::Opaque
+        } else {
+            wgpu::CompositeAlphaMode::Auto
+        };
 
         let surface_config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -581,13 +718,9 @@ impl App {
             color_space: wgpu::SurfaceColorSpace::Auto,
             width,
             height,
-            present_mode: if self.config.render.vsync {
-                wgpu::PresentMode::Fifo
-            } else {
-                wgpu::PresentMode::AutoNoVsync
-            },
+            present_mode: present_mode(self.config.render.vsync),
             desired_maximum_frame_latency: 2,
-            alpha_mode: wgpu::CompositeAlphaMode::Opaque,
+            alpha_mode,
             view_formats: vec![],
         };
         surface.configure(&device, &surface_config);
@@ -623,11 +756,36 @@ fn watch_config(path: &std::path::Path) -> Result<(Receiver<()>, notify::Recomme
     let mut watcher =
         notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
             if let Ok(event) = event
-                && event.paths.iter().any(|p| *p == watched)
+                && event.paths.contains(&watched)
             {
                 let _ = tx.send(());
             }
         })?;
     watcher.watch(&directory, notify::RecursiveMode::NonRecursive)?;
     Ok((rx, watcher))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retry_backoff_doubles_and_caps_at_the_daily_check() {
+        let mut delay = REFRESH_RETRY_MIN;
+        let mut previous = Duration::ZERO;
+        // However many failures arrive, the schedule keeps moving forward and
+        // settles at one attempt per day rather than growing without bound.
+        for _ in 0..10 {
+            assert!(delay > previous, "backoff must not shrink");
+            assert!(delay <= REFRESH_CHECK_INTERVAL, "backoff must cap at the daily check");
+            previous = delay;
+            let next = next_retry_backoff(delay);
+            if next == delay {
+                break;
+            }
+            delay = next;
+        }
+        assert_eq!(delay, REFRESH_CHECK_INTERVAL, "the cap is the daily check interval");
+        assert_eq!(next_retry_backoff(REFRESH_CHECK_INTERVAL), REFRESH_CHECK_INTERVAL);
+    }
 }

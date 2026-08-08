@@ -193,6 +193,10 @@ impl Almanac {
 ///  N = 3.34e-02 MA= 2.82e+02 TA= 2.76e+02
 ///  A = 9.53e+00 AD= 1.00e+01 PR= 1.07e+04
 /// ```
+/// The element fields `flush` consumes. Everything else in a Horizons record
+/// is surplus and may safely fail to parse.
+const REQUIRED_FIELDS: [&str; 7] = ["A", "EC", "IN", "OM", "W", "MA", "N"];
+
 pub fn parse_horizons_elements(text: &str) -> Result<Vec<Osculating>, AlmanacError> {
     let body = text
         .split_once("$$SOE")
@@ -247,8 +251,21 @@ pub fn parse_horizons_elements(text: &str) -> Result<Vec<Osculating>, AlmanacErr
         // Otherwise it is up to three "KEY= value" pairs.
         for pair in split_key_value_pairs(trimmed) {
             let Some((key, value)) = pair else { continue };
-            if let Ok(number) = value.parse::<f64>() {
-                fields.insert(key, number);
+            match value.parse::<f64>() {
+                Ok(number) => {
+                    fields.insert(key, number);
+                }
+                // A required field we cannot read must be an error naming the
+                // real problem here; dropping it would surface later as a
+                // misleading `MissingField`. Unknown keys stay ignored —
+                // Horizons emits plenty we never consume.
+                Err(_) if REQUIRED_FIELDS.contains(&key) => {
+                    return Err(AlmanacError::UnparseableValue {
+                        key: key.to_owned(),
+                        value: value.to_owned(),
+                    });
+                }
+                Err(_) => {}
             }
         }
     }
@@ -282,6 +299,8 @@ pub enum AlmanacError {
     NoRecords,
     #[error("element record is missing field {0}")]
     MissingField(String),
+    #[error("element field {key} has unparseable value {value:?}")]
+    UnparseableValue { key: String, value: String },
     #[error("unknown body {0:?} in almanac")]
     UnknownBody(String),
     #[error("implausible elements for {0} at epoch {1}")]
@@ -368,6 +387,24 @@ $$EOE
             parse_horizons_elements(truncated),
             Err(AlmanacError::MissingField(_))
         ));
+    }
+
+    /// A required field whose value cannot be read must fail naming that
+    /// field. If it were silently dropped — say Horizons switched to Fortran
+    /// `D`-exponents — the error would be a baffling `MissingField` instead.
+    #[test]
+    fn names_the_field_when_a_required_value_is_unparseable() {
+        let doctored = SATURN_RESPONSE.replace("EC= 5.535357040578952E-02", "EC= 5.535357040578952D-02");
+        match parse_horizons_elements(&doctored) {
+            Err(AlmanacError::UnparseableValue { key, value }) => {
+                assert_eq!(key, "EC");
+                assert!(value.contains("D-02"), "the offending token is quoted: {value:?}");
+            }
+            other => panic!("expected UnparseableValue for EC, got {other:?}"),
+        }
+        // Surplus fields Horizons emits are still free to be strange.
+        let surplus = SATURN_RESPONSE.replace("Tp=  2463550.550155367237", "Tp=  not-a-number");
+        assert!(parse_horizons_elements(&surplus).is_ok());
     }
 
     fn saturn_almanac() -> Almanac {

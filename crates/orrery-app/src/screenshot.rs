@@ -45,6 +45,9 @@ pub fn capture(
         required_limits: wgpu::Limits::default(),
         ..Default::default()
     }))?;
+    device.on_uncaptured_error(std::sync::Arc::new(|error| {
+        log::error!("wgpu error: {error}");
+    }));
 
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("screenshot"),
@@ -78,7 +81,9 @@ pub fn capture(
     let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(COPY_ALIGNMENT) * COPY_ALIGNMENT;
     let readback = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("screenshot readback"),
-        size: (padded_bytes_per_row * height) as u64,
+        // Widen before multiplying: at very large --size values the u32
+        // product wraps and would allocate a too-small buffer.
+        size: u64::from(padded_bytes_per_row) * u64::from(height),
         usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
         mapped_at_creation: false,
     });
@@ -119,10 +124,11 @@ pub fn capture(
         .context("could not map the readback buffer")?;
 
     let mapped = readback.slice(..).get_mapped_range()?;
-    // Strip the row padding.
-    let mut pixels = Vec::with_capacity((unpadded_bytes_per_row * height) as usize);
-    for row in 0..height {
-        let start = (row * padded_bytes_per_row) as usize;
+    // Strip the row padding. Index math in usize for the same wrap reason as
+    // the buffer size above.
+    let mut pixels = Vec::with_capacity(unpadded_bytes_per_row as usize * height as usize);
+    for row in 0..height as usize {
+        let start = row * padded_bytes_per_row as usize;
         pixels.extend_from_slice(&mapped[start..start + unpadded_bytes_per_row as usize]);
     }
     drop(mapped);

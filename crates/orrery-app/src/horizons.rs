@@ -75,6 +75,16 @@ pub fn load_cached(path: &std::path::Path) -> Option<Almanac> {
     }
 }
 
+/// The temporary path `save` writes before renaming into place.
+///
+/// The name carries the process id because Plasma runs one orrery per output:
+/// on a shared stale cache they all fetch at once, and two processes writing
+/// the same temp file interleave — the loser's rename then publishes torn
+/// content. Distinct names keep every write private until its atomic rename.
+fn temp_path(path: &std::path::Path) -> PathBuf {
+    path.with_extension(format!("toml.tmp.{}", std::process::id()))
+}
+
 pub fn save(almanac: &Almanac, path: &std::path::Path) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -82,11 +92,13 @@ pub fn save(almanac: &Almanac, path: &std::path::Path) -> Result<()> {
     }
     // Write then rename, so a crash mid-write cannot leave a half-file that
     // the next run would have to reject.
-    let temporary = path.with_extension("toml.tmp");
+    let temporary = temp_path(path);
     std::fs::write(&temporary, almanac.to_toml()?)
         .with_context(|| format!("writing {}", temporary.display()))?;
-    std::fs::rename(&temporary, path)
-        .with_context(|| format!("renaming into {}", path.display()))?;
+    if let Err(error) = std::fs::rename(&temporary, path) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error).with_context(|| format!("renaming into {}", path.display()));
+    }
     Ok(())
 }
 
@@ -222,6 +234,51 @@ mod tests {
             needs_refresh(Some(&fresh), JulianDate(now.0 + 300.0), 3650.0),
             "no longer covers now"
         );
+    }
+
+    #[test]
+    fn temp_path_is_distinct_per_process_and_never_the_target() {
+        let target = std::path::Path::new("/tmp/orrery-test/almanac.toml");
+        let temporary = temp_path(target);
+        assert_ne!(temporary, target);
+        assert_eq!(temporary.parent(), target.parent(), "rename must stay on one filesystem");
+        let name = temporary.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(
+            name.ends_with(&format!(".{}", std::process::id())),
+            "{name} should end with this process id, so concurrent per-output \
+             processes never write the same temp file"
+        );
+    }
+
+    #[test]
+    fn save_leaves_no_temp_file_behind() {
+        let directory = std::env::temp_dir().join(format!("orrery-save-{}", std::process::id()));
+        let path = directory.join("almanac.toml");
+        let almanac = Almanac {
+            retrieved: 2_461_255.5,
+            bodies: BTreeMap::from([(
+                "Earth".to_owned(),
+                vec![Osculating {
+                    epoch: 2_461_255.5,
+                    a: 1.0,
+                    e: 0.017,
+                    inclination: 0.0,
+                    ascending_node: 0.0,
+                    argument_of_perihelion: 102.9,
+                    mean_anomaly: 0.0,
+                    mean_motion: 0.9856,
+                }],
+            )]),
+        };
+        save(&almanac, &path).expect("save should succeed");
+        assert!(path.is_file(), "the almanac must exist at the target path");
+        let leftovers: Vec<_> = std::fs::read_dir(&directory)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path() != path)
+            .collect();
+        assert!(leftovers.is_empty(), "no temp files may remain: {leftovers:?}");
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]
