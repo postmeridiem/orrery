@@ -509,9 +509,15 @@ impl App {
 
         // Acquire the frame *before* building the scene, so a covered or
         // occluded wallpaper skips the whole CPU build, not just the GPU work.
+        let mut suboptimal = false;
         let frame = match graphics.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(frame)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
+            wgpu::CurrentSurfaceTexture::Success(frame) => frame,
+            wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
+                // Usable this frame, but reconfigure after presenting so the
+                // swapchain does not stay suboptimal indefinitely.
+                suboptimal = true;
+                frame
+            }
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                 graphics
                     .surface
@@ -573,6 +579,12 @@ impl App {
             elapsed as f32,
         );
         graphics.queue.present(frame);
+
+        if suboptimal {
+            graphics
+                .surface
+                .configure(&graphics.device, &graphics.surface_config);
+        }
     }
 }
 
@@ -606,6 +618,23 @@ impl ApplicationHandler for App {
                     graphics
                         .renderer
                         .resize(&graphics.device, size.width, size.height);
+                }
+            }
+            // A DPI change alone does not always come with a `Resized`, and a
+            // stale surface size on the new scale renders blurry.
+            WindowEvent::ScaleFactorChanged { .. } => {
+                if let Some(graphics) = &mut self.graphics {
+                    let size = graphics.window.inner_size();
+                    if size.width > 0 && size.height > 0 {
+                        graphics.surface_config.width = size.width;
+                        graphics.surface_config.height = size.height;
+                        graphics
+                            .surface
+                            .configure(&graphics.device, &graphics.surface_config);
+                        graphics
+                            .renderer
+                            .resize(&graphics.device, size.width, size.height);
+                    }
                 }
             }
             WindowEvent::RedrawRequested => self.draw(),

@@ -1,10 +1,48 @@
 // The stellar background: a procedural starfield, the galactic band and
 // nebulosity, evaluated per pixel from the view ray. No textures, no assets.
+//
+// The evaluation runs a few hundred hash calls per pixel and depends only on
+// the camera orientation, which drifts thousandths of a degree per frame — so
+// `fragment_main` renders into an offscreen cache only when the camera has
+// turned at least half a pixel, and `fragment_present` puts the cache on
+// screen every frame.
 
 struct SkyVertex {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) ndc: vec2<f32>,
 };
+
+struct SkyPresent {
+    // The view-projection the cache was rendered with.
+    cached_view_projection: mat4x4<f32>,
+    // x = 1 when the cache was rendered for exactly this frame's camera, so
+    // the pixel can be copied rather than reprojected. y, z, w spare.
+    params: vec4<f32>,
+};
+
+@group(1) @binding(0) var sky_cache: texture_2d<f32>;
+@group(1) @binding(1) var sky_cache_sampler: sampler;
+@group(1) @binding(2) var<uniform> sky_present: SkyPresent;
+
+@fragment
+fn fragment_present(in: SkyVertex) -> @location(0) vec4<f32> {
+    // Fresh cache: an exact texel copy, bit-identical to having evaluated the
+    // procedural sky directly into this frame.
+    if (sky_present.params.x > 0.5) {
+        return textureLoad(sky_cache, vec2<i32>(in.clip_position.xy), 0);
+    }
+    // Stale by less than half a pixel of camera drift: reproject this pixel's
+    // view ray through the camera the cache was rendered with. The sky is at
+    // infinity, so the ray projects as a direction — w = 0 drops the
+    // translation — and the sampler's edge clamp absorbs the sub-pixel of
+    // uncovered border the drift exposes.
+    let ray = view_ray(in.ndc);
+    let clip = sky_present.cached_view_projection * vec4<f32>(ray, 0.0);
+    let w = max(clip.w, 1e-6);
+    let cached_ndc = clip.xy / w;
+    let uv = vec2<f32>(cached_ndc.x, -cached_ndc.y) * 0.5 + vec2<f32>(0.5);
+    return textureSampleLevel(sky_cache, sky_cache_sampler, uv, 0.0);
+}
 
 @vertex
 fn vertex_main(@builtin(vertex_index) vertex_index: u32) -> SkyVertex {

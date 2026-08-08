@@ -5,15 +5,13 @@ struct Globals {
     inverse_view_projection: mat4x4<f32>,
     // xyz = camera position in scene units, w = elapsed seconds.
     camera: vec4<f32>,
-    // xyz = the Sun's position (the origin), w = its drawn radius.
-    sun: vec4<f32>,
     // star density, star brightness, milky way intensity, nebula intensity.
     sky_a: vec4<f32>,
     // ambient floor, cos(sky rotation), sin(sky rotation), seed.
     sky_b: vec4<f32>,
     // width, height, 1/width, 1/height.
     viewport: vec4<f32>,
-    // exposure multiplier, bloom intensity, unused, orbit width in pixels.
+    // x, y, z spare; w = orbit width in pixels.
     post: vec4<f32>,
     // angular size of one pixel in radians, star core radius in pixels,
     // constellation opacity, unused.
@@ -160,10 +158,4 @@ fn fullscreen_position(vertex_index: u32) -> vec4<f32> {
     let x = f32(i32(vertex_index) / 2) * 4.0 - 1.0;
     let y = f32(i32(vertex_index) & 1) * 4.0 - 1.0;
     return vec4<f32>(x, y, 0.0, 1.0);
-}
-
-fn fullscreen_uv(vertex_index: u32) -> vec2<f32> {
-    let x = f32(i32(vertex_index) / 2) * 2.0;
-    let y = f32(i32(vertex_index) & 1) * 2.0;
-    return vec2<f32>(x, 1.0 - y);
 }

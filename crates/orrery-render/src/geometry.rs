@@ -23,7 +23,9 @@ impl Vertex {
 
 pub struct Mesh {
     pub vertices: Vec<Vertex>,
-    pub indices: Vec<u32>,
+    /// `u16`: the largest mesh here is under 5,000 vertices, and 16-bit
+    /// indices halve the index memory and fetch bandwidth.
+    pub indices: Vec<u16>,
 }
 
 /// A UV sphere of unit radius.
@@ -34,6 +36,10 @@ pub struct Mesh {
 pub fn sphere(segments: u32, rings: u32) -> Mesh {
     let segments = segments.max(3);
     let rings = rings.max(2);
+    assert!(
+        (segments + 1) * (rings + 1) <= u16::MAX as u32 + 1,
+        "sphere({segments}, {rings}) exceeds 16-bit indexing"
+    );
 
     let mut vertices = Vec::with_capacity(((segments + 1) * (rings + 1)) as usize);
     for ring in 0..=rings {
@@ -59,8 +65,8 @@ pub fn sphere(segments: u32, rings: u32) -> Mesh {
     let stride = segments + 1;
     for ring in 0..rings {
         for segment in 0..segments {
-            let a = ring * stride + segment;
-            let b = a + stride;
+            let a = (ring * stride + segment) as u16;
+            let b = a + stride as u16;
             // Counter-clockwise seen from outside, which is what the default
             // front face and back-face culling expect.
             indices.extend_from_slice(&[a, a + 1, b, a + 1, b + 1, b]);
@@ -79,6 +85,10 @@ pub fn sphere(segments: u32, rings: u32) -> Mesh {
 /// doubles as the coordinate the radial banding is sampled against.
 pub fn ring(segments: u32) -> Mesh {
     let segments = segments.max(3);
+    assert!(
+        (segments + 1) * 2 <= u16::MAX as u32 + 1,
+        "ring({segments}) exceeds 16-bit indexing"
+    );
     let mut vertices = Vec::with_capacity(((segments + 1) * 2) as usize);
     for segment in 0..=segments {
         let along = segment as f32 / segments as f32;
@@ -94,7 +104,7 @@ pub fn ring(segments: u32) -> Mesh {
 
     let mut indices = Vec::with_capacity((segments * 6) as usize);
     for segment in 0..segments {
-        let a = segment * 2;
+        let a = (segment * 2) as u16;
         indices.extend_from_slice(&[a, a + 1, a + 2, a + 2, a + 1, a + 3]);
     }
 

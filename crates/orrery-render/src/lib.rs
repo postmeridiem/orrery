@@ -118,13 +118,57 @@ struct GpuGlobals {
     view_projection: [[f32; 4]; 4],
     inverse_view_projection: [[f32; 4]; 4],
     camera: [f32; 4],
-    sun: [f32; 4],
     sky_a: [f32; 4],
     sky_b: [f32; 4],
     viewport: [f32; 4],
     post: [f32; 4],
     sky_c: [f32; 4],
     lighting: [f32; 4],
+}
+
+/// Uniform for the sky-present pass: the view-projection the cache was
+/// rendered with, and in `params.x` whether that is exactly this frame's.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+struct GpuSkyPresent {
+    cached_view_projection: [[f32; 4]; 4],
+    params: [f32; 4],
+}
+
+/// Everything the procedural sky's output depends on besides the camera
+/// orientation. A change to any of it invalidates the cached sky.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct SkyFingerprint {
+    star_brightness: f32,
+    milky_way: f32,
+    fov_y_radians: f32,
+    width: u32,
+    height: u32,
+}
+
+/// What the cached sky texture currently holds.
+#[derive(Debug)]
+struct CachedSky {
+    view_projection: Mat4,
+    forward: Vec3,
+    fingerprint: SkyFingerprint,
+}
+
+/// Does the cached sky need re-rendering for this frame?
+///
+/// True when there is no cache, when anything the sky reads has changed, or
+/// when the camera has turned at least half a pixel since the cache was
+/// rendered — the point at which reprojection would start to soften it.
+/// Compared through the cross product, whose length is sin(angle): at these
+/// tiny angles a dot-product comparison would drown in f32 rounding at 1.0.
+fn sky_refresh_due(cached: Option<&CachedSky>, fingerprint: &SkyFingerprint, forward: Vec3) -> bool {
+    let Some(cached) = cached else { return true };
+    if cached.fingerprint != *fingerprint {
+        return true;
+    }
+    let half_pixel = 0.5 * fingerprint.fov_y_radians / fingerprint.height.max(1) as f32;
+    let drift = cached.forward.cross(forward).length();
+    cached.forward.dot(forward) <= 0.0 || drift >= half_pixel
 }
 
 #[repr(C)]
@@ -251,6 +295,11 @@ struct Targets {
     multisampled_colour: wgpu::TextureView,
     hdr: wgpu::TextureView,
     depth: wgpu::TextureView,
+    /// The cached procedural sky, re-rendered only when the camera has moved
+    /// at least half a pixel.
+    sky_cache: wgpu::TextureView,
+    /// Bind group the sky-present pass reads the cache through.
+    sky_present_bind_group: wgpu::BindGroup,
     /// One view per bloom mip.
     bloom_mips: Vec<wgpu::TextureView>,
     /// Bind group reading mip `i`, used as the source when writing a neighbour.
@@ -286,7 +335,13 @@ pub struct Renderer {
     sphere: GpuMesh,
     ring: GpuMesh,
 
-    sky_pipeline: wgpu::RenderPipeline,
+    /// Renders the procedural sky into the cache, single-sampled.
+    sky_refresh_pipeline: wgpu::RenderPipeline,
+    /// Puts the cached sky on screen inside the multisampled scene pass.
+    sky_present_pipeline: wgpu::RenderPipeline,
+    sky_present: wgpu::Buffer,
+    sky_present_layout: wgpu::BindGroupLayout,
+    cached_sky: Option<CachedSky>,
     star_pipeline: wgpu::RenderPipeline,
     belt_pipeline: wgpu::RenderPipeline,
     constellation_pipeline: wgpu::RenderPipeline,
@@ -404,6 +459,40 @@ impl Renderer {
                 count: None,
             }],
         });
+
+        // The cached sky texture, its sampler, and the reprojection uniform.
+        let sky_present_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("sky present"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
 
         let blit_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("blit"),
@@ -534,6 +623,13 @@ impl Renderer {
             }],
         });
 
+        let sky_present = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("sky present"),
+            size: size_of::<GpuSkyPresent>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         let sphere = GpuMesh::upload(device, "sphere", &geometry::sphere(96, 48));
         let ring = GpuMesh::upload(device, "ring", &geometry::ring(256));
 
@@ -596,34 +692,68 @@ impl Renderer {
             })
         };
 
-        let sky_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("sky"),
-            layout: Some(&globals_only_layout),
-            vertex: wgpu::VertexState {
-                module: &sky_shader,
-                entry_point: Some("vertex_main"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            primitive: wgpu::PrimitiveState::default(),
-            // The sky is behind everything and occludes nothing.
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
-                depth_write_enabled: Some(false),
-                depth_compare: Some(wgpu::CompareFunction::Always),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample,
-            fragment: Some(wgpu::FragmentState {
-                module: &sky_shader,
-                entry_point: Some("fragment_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(HDR_FORMAT.into())],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
+        // The expensive procedural evaluation, into the single-sample cache.
+        // The fullscreen triangle has no geometric edges, so under MSAA every
+        // sample of a pixel shades identically anyway — single-sampling the
+        // cache loses nothing.
+        let sky_refresh_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("sky refresh"),
+                layout: Some(&globals_only_layout),
+                vertex: wgpu::VertexState {
+                    module: &sky_shader,
+                    entry_point: Some("vertex_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &sky_shader,
+                    entry_point: Some("fragment_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(HDR_FORMAT.into())],
+                }),
+                multiview_mask: None,
+                cache: None,
+            });
+
+        let sky_present_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("sky present"),
+                bind_group_layouts: &[Some(&globals_layout), Some(&sky_present_layout)],
+                immediate_size: 0,
+            });
+        let sky_present_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("sky present"),
+                layout: Some(&sky_present_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &sky_shader,
+                    entry_point: Some("vertex_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                primitive: wgpu::PrimitiveState::default(),
+                // The sky is behind everything and occludes nothing.
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(wgpu::CompareFunction::Always),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample,
+                fragment: Some(wgpu::FragmentState {
+                    module: &sky_shader,
+                    entry_point: Some("fragment_present"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(HDR_FORMAT.into())],
+                }),
+                multiview_mask: None,
+                cache: None,
+            });
 
         let body_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("bodies"),
@@ -897,8 +1027,10 @@ impl Renderer {
             sample_count,
             &blit_layout,
             &tonemap_layout,
+            &sky_present_layout,
             &sampler,
             &tonemap_settings,
+            &sky_present,
         );
 
         Self {
@@ -918,7 +1050,11 @@ impl Renderer {
             uploaded_belts_generation: 0,
             sphere,
             ring,
-            sky_pipeline,
+            sky_refresh_pipeline,
+            sky_present_pipeline,
+            sky_present,
+            sky_present_layout,
+            cached_sky: None,
             star_pipeline,
             belt_pipeline,
             constellation_pipeline,
@@ -1105,6 +1241,8 @@ impl Renderer {
             return;
         }
         self.size = (width, height);
+        // The cached sky lives in the targets being replaced.
+        self.cached_sky = None;
         // While released, only the size is recorded; the next frame rebuilds.
         if self.targets.is_some() {
             self.targets = Some(self.build_targets(device));
@@ -1119,6 +1257,8 @@ impl Renderer {
     /// first visible frame takes milliseconds.
     pub fn release_targets(&mut self) {
         if self.targets.take().is_some() {
+            // The cached sky went with them.
+            self.cached_sky = None;
             log::info!("released render targets while occluded");
         }
     }
@@ -1131,8 +1271,10 @@ impl Renderer {
             self.sample_count,
             &self.blit_layout,
             &self.tonemap_layout,
+            &self.sky_present_layout,
             &self.sampler,
             &self.tonemap_settings,
+            &self.sky_present,
         )
     }
 
@@ -1148,12 +1290,46 @@ impl Renderer {
     ) {
         if self.targets.is_none() {
             self.targets = Some(self.build_targets(device));
+            // The sky cache texture is brand new and holds nothing yet.
+            self.cached_sky = None;
         }
 
         let (width, height) = self.size;
         let aspect = width as f32 / height.max(1) as f32;
+        let view_projection = scene.camera.view_projection(aspect);
 
-        self.upload_globals(queue, scene, config, aspect, elapsed_seconds);
+        // Decide whether the cached sky still matches this frame's camera.
+        let fingerprint = SkyFingerprint {
+            star_brightness: config.sky.star_brightness,
+            milky_way: config.sky.milky_way,
+            fov_y_radians: scene.camera.fov_y_radians,
+            width,
+            height,
+        };
+        let forward = (scene.camera.target - scene.camera.eye).normalize_or(Vec3::NEG_Z);
+        let refresh_sky = sky_refresh_due(self.cached_sky.as_ref(), &fingerprint, forward);
+        if refresh_sky {
+            self.cached_sky = Some(CachedSky {
+                view_projection,
+                forward,
+                fingerprint,
+            });
+        }
+        let cached_view_projection = self
+            .cached_sky
+            .as_ref()
+            .expect("set on refresh, and refresh is forced when absent")
+            .view_projection;
+        queue.write_buffer(
+            &self.sky_present,
+            0,
+            bytemuck::bytes_of(&GpuSkyPresent {
+                cached_view_projection: cached_view_projection.to_cols_array_2d(),
+                params: [if refresh_sky { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
+            }),
+        );
+
+        self.upload_globals(queue, scene, config, view_projection, elapsed_seconds);
         let (sphere_instances, ring_instances) = self.upload_instances(device, queue, scene);
         self.upload_orbits(device, queue, scene, config);
         self.upload_belts(device, queue, scene);
@@ -1163,6 +1339,9 @@ impl Renderer {
         let mut encoder =
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
 
+        if refresh_sky {
+            self.sky_refresh_pass(&mut encoder, targets);
+        }
         self.scene_pass(&mut encoder, targets, sphere_instances, ring_instances);
         self.bloom_pass(&mut encoder, targets);
         self.tonemap_pass(&mut encoder, targets, output);
@@ -1170,15 +1349,37 @@ impl Renderer {
         queue.submit([encoder.finish()]);
     }
 
+    /// Re-render the procedural sky into its cache.
+    fn sky_refresh_pass(&self, encoder: &mut wgpu::CommandEncoder, targets: &Targets) {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("sky refresh"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &targets.sky_cache,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.sky_refresh_pipeline);
+        pass.set_bind_group(0, &self.globals_bind_group, &[]);
+        pass.draw(0..3, 0..1);
+    }
+
     fn upload_globals(
         &self,
         queue: &wgpu::Queue,
         scene: &Scene,
         config: &Config,
-        aspect: f32,
+        view_projection: Mat4,
         elapsed_seconds: f32,
     ) {
-        let view_projection = scene.camera.view_projection(aspect);
         let rotation = look::SKY_ROTATION_DEG.to_radians();
         let globals = GpuGlobals {
             view_projection: view_projection.to_cols_array_2d(),
@@ -1189,7 +1390,6 @@ impl Renderer {
                 scene.camera.eye.z,
                 elapsed_seconds,
             ],
-            sun: [0.0, 0.0, 0.0, scene.sun.radius],
             sky_a: [
                 look::STAR_DENSITY,
                 config.sky.star_brightness,
@@ -1209,13 +1409,9 @@ impl Renderer {
                 1.0 / self.size.0 as f32,
                 1.0 / self.size.1 as f32,
             ],
-            post: [
-                look::EXPOSURE,
-                look::BLOOM_INTENSITY,
-                // Spare slot; the vec4 has to stay 16-byte aligned.
-                0.0,
-                look::ORBIT_WIDTH_PX,
-            ],
+            // Three spare slots; only `w` is read. `x` and `y` used to carry a
+            // stale duplicate of the tonemap settings that no shader consumed.
+            post: [0.0, 0.0, 0.0, look::ORBIT_WIDTH_PX],
             sky_c: [
                 // One pixel's angular size, so stars can be sized in pixels
                 // rather than in units of whatever lattice generated them.
@@ -1398,7 +1594,8 @@ impl Renderer {
 
         pass.set_bind_group(0, &self.globals_bind_group, &[]);
 
-        pass.set_pipeline(&self.sky_pipeline);
+        pass.set_pipeline(&self.sky_present_pipeline);
+        pass.set_bind_group(1, &targets.sky_present_bind_group, &[]);
         pass.draw(0..3, 0..1);
 
         // Real sky on top of the procedural haze, still behind the planets.
@@ -1418,13 +1615,13 @@ impl Renderer {
         pass.set_bind_group(1, &self.instances_bind_group, &[]);
         pass.set_pipeline(&self.body_pipeline);
         pass.set_vertex_buffer(0, self.sphere.vertices.slice(..));
-        pass.set_index_buffer(self.sphere.indices.slice(..), wgpu::IndexFormat::Uint32);
+        pass.set_index_buffer(self.sphere.indices.slice(..), wgpu::IndexFormat::Uint16);
         pass.draw_indexed(0..self.sphere.index_count, 0, sphere_instances);
 
         if !ring_instances.is_empty() {
             pass.set_pipeline(&self.ring_pipeline);
             pass.set_vertex_buffer(0, self.ring.vertices.slice(..));
-            pass.set_index_buffer(self.ring.indices.slice(..), wgpu::IndexFormat::Uint32);
+            pass.set_index_buffer(self.ring.indices.slice(..), wgpu::IndexFormat::Uint16);
             pass.draw_indexed(0..self.ring.index_count, 0, ring_instances);
         }
 
@@ -1689,8 +1886,10 @@ impl Targets {
         sample_count: u32,
         blit_layout: &wgpu::BindGroupLayout,
         tonemap_layout: &wgpu::BindGroupLayout,
+        sky_present_layout: &wgpu::BindGroupLayout,
         sampler: &wgpu::Sampler,
         tonemap_settings: &wgpu::Buffer,
+        sky_present: &wgpu::Buffer,
     ) -> Self {
         let width = width.max(1);
         let height = height.max(1);
@@ -1737,6 +1936,39 @@ impl Targets {
                 view_formats: &[],
             })
             .create_view(&Default::default());
+
+        let sky_cache = device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("sky cache"),
+                size: extent(width, height),
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: HDR_FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+            .create_view(&Default::default());
+
+        let sky_present_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("sky present"),
+            layout: sky_present_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&sky_cache),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: sky_present.as_entire_binding(),
+                },
+            ],
+        });
 
         // The bloom chain starts at half resolution. Stop before any mip would
         // collapse to nothing.
@@ -1823,6 +2055,8 @@ impl Targets {
             multisampled_colour,
             hdr,
             depth,
+            sky_cache,
+            sky_present_bind_group,
             bloom_mips,
             bloom_sources,
             hdr_source,
@@ -1883,6 +2117,86 @@ mod tests {
         // Every vertex's neighbour is the next point, wrapping at the end.
         let first_ring = &vertices[0..16];
         assert_eq!(first_ring[14].neighbour, [0.0, 0.0, 0.0], "last point wraps to first");
+    }
+
+    fn fingerprint() -> SkyFingerprint {
+        SkyFingerprint {
+            star_brightness: 1.0,
+            milky_way: 0.4,
+            fov_y_radians: 38.0_f32.to_radians(),
+            width: 1920,
+            height: 1080,
+        }
+    }
+
+    fn cached(forward: Vec3) -> CachedSky {
+        CachedSky {
+            view_projection: Mat4::IDENTITY,
+            forward,
+            fingerprint: fingerprint(),
+        }
+    }
+
+    /// The sky refresh predicate is what makes the cache correct: too eager
+    /// and the optimisation evaporates, too lazy and the sky visibly smears.
+    #[test]
+    fn sky_refreshes_on_absence_config_and_drift_but_not_within_half_a_pixel() {
+        let fp = fingerprint();
+        let forward = Vec3::NEG_Z;
+
+        assert!(sky_refresh_due(None, &fp, forward), "no cache yet");
+        assert!(
+            !sky_refresh_due(Some(&cached(forward)), &fp, forward),
+            "same camera, same config: no refresh"
+        );
+
+        // Any config the sky reads changing must refresh.
+        let mut brighter = fp;
+        brighter.star_brightness = 2.0;
+        assert!(sky_refresh_due(Some(&cached(forward)), &brighter, forward));
+        let mut resized = fp;
+        resized.height = 1440;
+        assert!(sky_refresh_due(Some(&cached(forward)), &resized, forward));
+
+        // Half a pixel at this fov and height is ~3.1e-4 radians. A tenth of
+        // that must not refresh; three times it must.
+        let pixel = fp.fov_y_radians / fp.height as f32;
+        let turned = |angle: f32| {
+            Vec3::new(angle.sin(), 0.0, -angle.cos()).normalize()
+        };
+        assert!(
+            !sky_refresh_due(Some(&cached(forward)), &fp, turned(pixel * 0.05)),
+            "a twentieth of a pixel of drift must reuse the cache"
+        );
+        assert!(
+            sky_refresh_due(Some(&cached(forward)), &fp, turned(pixel * 1.5)),
+            "more than half a pixel of drift must refresh"
+        );
+        // A camera looking the other way entirely must refresh, however the
+        // cross product feels about it.
+        assert!(sky_refresh_due(Some(&cached(forward)), &fp, -forward));
+    }
+
+    /// The default camera drift — 360° per hour at 30 fps — must reuse the
+    /// cache for several frames per refresh, or the optimisation is imaginary.
+    #[test]
+    fn default_drift_reuses_the_cache_most_frames() {
+        let fp = fingerprint();
+        let per_frame = (360.0_f32 / 3600.0 / 30.0).to_radians();
+        let mut refreshes = 0;
+        let mut cache = cached(Vec3::NEG_Z);
+        for frame in 0..300 {
+            let angle = per_frame * frame as f32;
+            let forward = Vec3::new(angle.sin(), 0.0, -angle.cos()).normalize();
+            if sky_refresh_due(Some(&cache), &fp, forward) {
+                refreshes += 1;
+                cache = cached(forward);
+            }
+        }
+        assert!(
+            (20..=100).contains(&refreshes),
+            "{refreshes} refreshes in 300 frames; expected roughly one in five"
+        );
     }
 
     #[test]
